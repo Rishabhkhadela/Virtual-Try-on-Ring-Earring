@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AR Ring Pro – Zero-Drift Tracking</title>
+    <link rel="stylesheet" href="style.css">
+    
+    <!-- Three.js (r128) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+</head>
+<body>
+    <div class="mirror-container">
+        <video id="input_video" autoplay playsinline></video>
+        <canvas id="output_canvas"></canvas>
+        <canvas id="landmark_canvas"></canvas>
+        
+        <div id="loading">Initializing Zero-Drift Tracking...</div>
+        
+        <!-- Tuning UI -->
+        <div id="ui-panel">
+            <h3>Tweak Engine</h3>
+            <div class="ring-picker">
+                <label for="ringSelect" style="font-size: 13px; color: #ccc; font-weight: 500;">Ring Model:</label>
+                <select id="ringSelect"></select>
+                <button id="revertRingBtn" type="button">Revert</button>
+            </div>
+            <div class="finger-picker">
+                <span id="activeFingerLabel">Finger: Ring</span>
+                <button id="cycleFingerBtn" type="button">Cycle Finger</button>
+            </div>
+            <label style="display: flex; align-items: center;">Rot X: <input type="range" id="rotX" min="-180" max="180" value="73" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numX').value = this.value"><input type="number" id="numX" value="73" step="1" oninput="document.getElementById('rotX').value = this.value"></label>
+            <label style="display: flex; align-items: center;">Rot Y: <input type="range" id="rotY" min="-180" max="180" value="90" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numY').value = this.value"><input type="number" id="numY" value="90" step="1" oninput="document.getElementById('rotY').value = this.value"></label>
+            <label style="display: flex; align-items: center;">Rot Z: <input type="range" id="rotZ" min="-180" max="180" value="-67" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numZ').value = this.value"><input type="number" id="numZ" value="-67" step="1" oninput="document.getElementById('rotZ').value = this.value"></label>
+            <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.1); margin: 8px 0;">
+            <label style="display: flex; align-items: center;">Scale: <input type="range" id="scaleBase" min="0.1" max="3" step="0.05" value="0.75" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numScale').value = this.value"><input type="number" id="numScale" value="0.75" step="0.05" oninput="document.getElementById('scaleBase').value = this.value"></label>
+            <label style="display: flex; align-items: center;">Finger Mask: <input type="range" id="occluderScale" min="0.01" max="20" step="0.01" value="1" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numOcc').value = this.value"><input type="number" id="numOcc" value="1" step="0.01" oninput="document.getElementById('occluderScale').value = this.value"></label>
+            <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.1); margin: 8px 0;">
+            <h3>Face / Earring</h3>
+            <label class="debug-toggle">
+                <input type="checkbox" id="showFaceMesh" checked> Show Face Mesh
+            </label>
+            <label class="debug-toggle">
+                <input type="checkbox" id="showAxisHelpers" checked> Show Axis Helpers
+            </label>
+            <label style="display: flex; align-items: center;">Rot X: <input type="range" id="earringRotX" min="-180" max="180" value="77" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numEarRotX').value = this.value"><input type="number" id="numEarRotX" value="77" step="1" oninput="document.getElementById('earringRotX').value = this.value"></label>
+            <label style="display: flex; align-items: center;">Rot Y: <input type="range" id="earringRotY" min="-180" max="180" value="15" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numEarRotY').value = this.value"><input type="number" id="numEarRotY" value="15" step="1" oninput="document.getElementById('earringRotY').value = this.value"></label>
+            <label style="display: flex; align-items: center;">Rot Z: <input type="range" id="earringRotZ" min="-180" max="180" value="39" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numEarRotZ').value = this.value"><input type="number" id="numEarRotZ" value="39" step="1" oninput="document.getElementById('earringRotZ').value = this.value"></label>
+            <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.1); margin: 8px 0;">
+            <label style="display: flex; align-items: center;">Earring Scale: <input type="range" id="earringScale" min="0.1" max="3" step="0.05" value="1.0" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numEarringScale').value = this.value"><input type="number" id="numEarringScale" value="1.0" step="0.05" oninput="document.getElementById('earringScale').value = this.value"></label>
+            <label style="display: flex; align-items: center;">Y Offset: <input type="range" id="earringYOffset" min="-0.1" max="0.1" step="0.005" value="0.01" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numYOff').value = this.value"><input type="number" id="numYOff" value="0.01" step="0.005" oninput="document.getElementById('earringYOffset').value = this.value"></label>
+            <label style="display: flex; align-items: center;">X Offset: <input type="range" id="earringXOffset" min="-0.1" max="0.1" step="0.005" value="0" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numXOff').value = this.value"><input type="number" id="numXOff" value="0" step="0.005" oninput="document.getElementById('earringXOffset').value = this.value"></label>
+            <label style="display: flex; align-items: center;">Depth: <input type="range" id="earringZOffset" min="-0.1" max="0.1" step="0.005" value="0" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numZOff').value = this.value"><input type="number" id="numZOff" value="0" step="0.005" oninput="document.getElementById('earringZOffset').value = this.value"></label>
+            <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.1); margin: 8px 0;">
+            <h3>Pendant / Necklace</h3>
+            <label class="debug-toggle">
+                <input type="checkbox" id="showPendant" checked> Show Pendant
+            </label>
+            <label style="display: flex; align-items: center;">Rot X: <input type="range" id="pendantRotX" min="-180" max="180" value="11" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numPendantRotX').value = this.value"><input type="number" id="numPendantRotX" value="11" step="1" oninput="document.getElementById('pendantRotX').value = this.value"></label>
+            <label style="display: flex; align-items: center;">Rot Y: <input type="range" id="pendantRotY" min="-180" max="180" value="-23" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numPendantRotY').value = this.value"><input type="number" id="numPendantRotY" value="-23" step="1" oninput="document.getElementById('pendantRotY').value = this.value"></label>
+            <label style="display: flex; align-items: center;">Rot Z: <input type="range" id="pendantRotZ" min="-180" max="180" value="1" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numPendantRotZ').value = this.value"><input type="number" id="numPendantRotZ" value="1" step="1" oninput="document.getElementById('pendantRotZ').value = this.value"></label>
+            <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.1); margin: 8px 0;">
+            <label style="display: flex; align-items: center;">Pendant Scale: <input type="range" id="pendantScale" min="0.1" max="5" step="0.05" value="1.8" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numPendantScale').value = this.value"><input type="number" id="numPendantScale" value="1.8" step="0.05" oninput="document.getElementById('pendantScale').value = this.value"></label>
+            <label style="display: flex; align-items: center;">Y Offset: <input type="range" id="pendantYOffset" min="-0.2" max="0.2" step="0.005" value="-0.05" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numPendantYOff').value = this.value"><input type="number" id="numPendantYOff" value="-0.05" step="0.005" oninput="document.getElementById('pendantYOffset').value = this.value"></label>
+            <label style="display: flex; align-items: center;">X Offset: <input type="range" id="pendantXOffset" min="-0.1" max="0.1" step="0.005" value="0.005" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numPendantXOff').value = this.value"><input type="number" id="numPendantXOff" value="0.005" step="0.005" oninput="document.getElementById('pendantXOffset').value = this.value"></label>
+            <label style="display: flex; align-items: center;">Depth: <input type="range" id="pendantZOffset" min="-0.1" max="0.1" step="0.005" value="0" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numPendantZOff').value = this.value"><input type="number" id="numPendantZOff" value="0" step="0.005" oninput="document.getElementById('pendantZOffset').value = this.value"></label>
+            <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.1); margin: 8px 0;">
+            <h3>Bracelet / Watch</h3>
+            <div class="ring-picker">
+                <label for="wristModelSelect" style="font-size: 13px; color: #ccc; font-weight: 500;">Model:</label>
+                <select id="wristModelSelect">
+                    <option value="0">Snake Bracelet</option>
+                    <option value="1">Bangle</option>
+                    <option value="2">Watch</option>
+                </select>
+            </div>
+            <label class="debug-toggle">
+                <input type="checkbox" id="showWrist" checked> Show Bracelet/Watch
+            </label>
+            <label style="display: flex; align-items: center;">Rot X: <input type="range" id="wristRotX" min="-180" max="180" value="0" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numWristRotX').value = this.value"><input type="number" id="numWristRotX" value="0" step="1" oninput="document.getElementById('wristRotX').value = this.value"></label>
+            <label style="display: flex; align-items: center;">Rot Y: <input type="range" id="wristRotY" min="-180" max="180" value="0" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numWristRotY').value = this.value"><input type="number" id="numWristRotY" value="0" step="1" oninput="document.getElementById('wristRotY').value = this.value"></label>
+            <label style="display: flex; align-items: center;">Rot Z: <input type="range" id="wristRotZ" min="-180" max="180" value="0" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numWristRotZ').value = this.value"><input type="number" id="numWristRotZ" value="0" step="1" oninput="document.getElementById('wristRotZ').value = this.value"></label>
+            <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.1); margin: 8px 0;">
+            <label style="display: flex; align-items: center;">Scale: <input type="range" id="wristScale" min="0.1" max="5" step="0.05" value="1.0" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numWristScale').value = this.value"><input type="number" id="numWristScale" value="1.0" step="0.05" oninput="document.getElementById('wristScale').value = this.value"></label>
+            <label style="display: flex; align-items: center;">Y Offset: <input type="range" id="wristYOffset" min="-0.2" max="0.2" step="0.005" value="0" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numWristYOff').value = this.value"><input type="number" id="numWristYOff" value="0" step="0.005" oninput="document.getElementById('wristYOffset').value = this.value"></label>
+            <label style="display: flex; align-items: center;">X Offset: <input type="range" id="wristXOffset" min="-0.2" max="0.2" step="0.005" value="0" style="flex:1; margin: 0 10px;" oninput="document.getElementById('numWristXOff').value = this.value"><input type="number" id="numWristXOff" value="0" step="0.005" oninput="document.getElementById('wristXOffset').value = this.value"></label>
+        </div>
+    </div>
+
+    <!-- main.js module -->
+    <script type="module" src="main.js"></script>
+</body>
+</html>
