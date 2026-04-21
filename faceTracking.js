@@ -2,7 +2,10 @@ import {
   FaceLandmarker,
   FilesetResolver
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+<<<<<<< HEAD
 import { applyJewelryShading } from './Shader.js';
+=======
+>>>>>>> e5365f952916da0018d1b0eb56064c44107002be
 
 // =============================================================================
 // ONE-EURO FILTER — Jitter Mitigation (replaces rolling-average + adaptiveLerp)
@@ -667,6 +670,7 @@ function loadEarringModel(modelPath) {
       // The clip boundary = earlobe attachment. Decorative part hangs below.
       raw.position.set(-center.x, -clipY, -center.z);
 
+<<<<<<< HEAD
       // ---- Step 4.5: PBR shading (HDR IBL via scene.environment) ----
       applyJewelryShading(raw, {
         metal:   { metalness: 1.0, roughness: 0.05, envMapIntensity: 1.8, clearcoat: 0.7, clearcoatRoughness: 0.04 },
@@ -683,6 +687,8 @@ function loadEarringModel(modelPath) {
         }
       });
 
+=======
+>>>>>>> e5365f952916da0018d1b0eb56064c44107002be
       // ---- Step 5: Build hierarchy ----
       leftEarringInner = new THREE.Group();
       leftEarringInner.add(raw);

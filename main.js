@@ -3,7 +3,12 @@ import {
   FilesetResolver
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
 import { initializeFaceTracking, updateFaceTracking } from './faceTracking.js';
+<<<<<<< HEAD
 import { configureRenderer, loadHDREnvironment, applyJewelryShading, updateDiamondEnvTwist, setDiamondEnvCube, setDiamondEnvHDR } from './Shader.js';
+=======
+import { initializePendantTracking, updatePendantTracking } from './pendantTracking.js';
+import { initializeWristTracking, updateWristTracking } from './wristTracking.js';
+>>>>>>> e5365f952916da0018d1b0eb56064c44107002be
 
 // --- DOM Elements ---
 const videoElement = document.getElementById('input_video');
@@ -29,6 +34,7 @@ const renderer = new THREE.WebGLRenderer({
 });
 renderer.sortObjects = true; // respect renderOrder for occluder-before-jewelry
 renderer.localClippingEnabled = true; // allow per-material clipping planes (earring post clip)
+<<<<<<< HEAD
 renderer.setClearAlpha(0);
 configureRenderer(renderer);
 
@@ -243,6 +249,14 @@ function updateDiamondReflectionCube() {
   for (const n of hidden) n.visible = true;
 }
 
+=======
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.5));
+const dl1 = new THREE.DirectionalLight(0xffffff, 2.5);
+dl1.position.set(1, 1, 5);
+scene.add(dl1);
+
+>>>>>>> e5365f952916da0018d1b0eb56064c44107002be
 // --- Occluder (Finger Mask) ---
 const occluderGeometry = new THREE.CylinderGeometry(0.5, 0.5, 2, 32);
 const occluderMaterial = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: true });
@@ -358,6 +372,7 @@ function loadRingModel(modelPath, onComplete) {
     ringModel = new THREE.Group();
     ringModel.add(rawModel);
 
+<<<<<<< HEAD
     // Log material + mesh names once so we can tune the diamond detector if needed.
     const matNames = new Set();
     ringModel.traverse((n) => {
@@ -388,6 +403,13 @@ function loadRingModel(modelPath, onComplete) {
         envMapIntensity: 3.5, attenuationDistance: 2.5,
         clearcoat: 1.0, clearcoatRoughness: 0.0, dispersion: 0.010,
         sparkleStrength: 0.85, fringeStrength: 0.07
+=======
+    ringModel.traverse(n => {
+      if (n.isMesh && n.material) {
+        n.material.metalness = 1.0;
+        n.material.roughness = 0.1;
+        n.material.envMapIntensity = 2.0;
+>>>>>>> e5365f952916da0018d1b0eb56064c44107002be
       }
     });
 
@@ -476,11 +498,20 @@ async function initMediaPipe() {
 }
 initMediaPipe();
 initializeFaceTracking(videoElement, scene, camera, landmarkCtx, landmarkCanvas, mapToOrthographicSpace);
+<<<<<<< HEAD
+=======
+initializePendantTracking(scene, mapToOrthographicSpace);
+initializeWristTracking(scene, camera, mapToOrthographicSpace);
+>>>>>>> e5365f952916da0018d1b0eb56064c44107002be
 
 // AR Variables
 let targetPos = new THREE.Vector3(), targetQuat = new THREE.Quaternion(), targetScale = new THREE.Vector3(1, 1, 1);
 let targetOccQuat = new THREE.Quaternion(), targetOccScale = new THREE.Vector3(1, 1, 1);
 let isHandPresent = false;
+<<<<<<< HEAD
+=======
+let lastHandResults = null; // cached for wrist tracking
+>>>>>>> e5365f952916da0018d1b0eb56064c44107002be
 const ringFrontFlipQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI);
 
 // ORTHOGRAPHIC POSITIONING: Zero Drift Mapping
@@ -771,9 +802,12 @@ function checkCanvasSize() {
     const rect = containerElement.getBoundingClientRect();
     if (canvasElement.width !== Math.floor(rect.width) || canvasElement.height !== Math.floor(rect.height)) {
       renderer.setSize(rect.width, rect.height, false);
+<<<<<<< HEAD
       composer.setSize(Math.floor(rect.width), Math.floor(rect.height));
       bloomPass.setSize(Math.floor(rect.width), Math.floor(rect.height));
       sceneRT.setSize(Math.floor(rect.width), Math.floor(rect.height));
+=======
+>>>>>>> e5365f952916da0018d1b0eb56064c44107002be
       landmarkCanvas.width = Math.floor(rect.width);
       landmarkCanvas.height = Math.floor(rect.height);
       // Sync Orthographic Frustum to perfectly match the Aspect Ratio
@@ -797,12 +831,34 @@ function animate() {
     if (videoElement.currentTime !== lastVideoTime) {
       lastVideoTime = videoElement.currentTime;
       const results = handLandmarker.detectForVideo(videoElement, startTimeMs);
+<<<<<<< HEAD
+=======
+      lastHandResults = results;
+>>>>>>> e5365f952916da0018d1b0eb56064c44107002be
       processResults(results);
     }
   }
 
   // Face tracking (earrings)
   updateFaceTracking(videoElement, performance.now());
+<<<<<<< HEAD
+=======
+  // Pendant tracking (must come after face tracking)
+  updatePendantTracking();
+
+  // Wrist tracking (bracelet/watch) — reuses existing hand detection results
+  if (lastHandResults && lastHandResults.landmarks && lastHandResults.landmarks.length > 0) {
+    const wristLandmarks = lastHandResults.landmarks[0];
+    const wristWorldLandmarks = lastHandResults.worldLandmarks ? lastHandResults.worldLandmarks[0] : null;
+    const isRightHand = lastHandResults.handednesses &&
+      lastHandResults.handednesses[0] &&
+      lastHandResults.handednesses[0][0] &&
+      lastHandResults.handednesses[0][0].categoryName === 'Right';
+    updateWristTracking(wristLandmarks, wristWorldLandmarks, isRightHand);
+  } else {
+    updateWristTracking(null, null, true);
+  }
+>>>>>>> e5365f952916da0018d1b0eb56064c44107002be
 
   if (ringModel && isHandPresent) {
     ringModel.position.lerp(targetPos, 0.9); // Immediate lock-on
@@ -813,15 +869,19 @@ function animate() {
     ringModel.quaternion.slerp(targetQuat, 0.3);
     occluderMesh.quaternion.slerp(targetOccQuat, 0.3);
     ringModel.scale.lerp(targetScale, 0.5);
+<<<<<<< HEAD
     // Scintillation — rotate the gem shader's env-twist 2× the ring's current
     // rotation so sparkle moves faster than the hand (diamond-like dynamic fire).
     updateDiamondEnvTwist(ringModel, ringModel.quaternion);
+=======
+>>>>>>> e5365f952916da0018d1b0eb56064c44107002be
     occluderMesh.scale.lerp(targetOccScale, 0.5);
     occluderMesh.visible = true;
   } else if (occluderMesh) {
     occluderMesh.visible = false;
     hideBlockerOccluders();
   }
+<<<<<<< HEAD
   // Re-bake the diamond's reflection cube at the ring's current position.
   // Runs BEFORE the alpha snapshot + composer so the sceneRT and composer both
   // see the gem with fresh metal reflections captured this frame.
@@ -835,12 +895,19 @@ function animate() {
   renderer.setRenderTarget(null);
 
   composer.render();
+=======
+  renderer.render(scene, camera);
+>>>>>>> e5365f952916da0018d1b0eb56064c44107002be
 }
 animate();
 
 navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 960 } })
+<<<<<<< HEAD
   .then(stream => { 
     videoElement.srcObject = stream;
     videoElement.play(); 
   })
+=======
+  .then(stream => { videoElement.srcObject = stream; })
+>>>>>>> e5365f952916da0018d1b0eb56064c44107002be
   .catch(() => { loadingElement.innerText = "Camera Error"; });

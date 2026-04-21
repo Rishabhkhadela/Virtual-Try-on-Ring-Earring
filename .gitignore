@@ -1,5 +1,3 @@
-# Ignore assets folder
-assets/
 assets/
 .claude/
 .gemini/
