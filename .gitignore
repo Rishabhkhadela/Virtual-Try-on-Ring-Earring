@@ -1,0 +1,8 @@
+# Ignore assets folder
+assets/
+assets/
+.claude/
+.gemini/
+node_modules/
+.DS_Store
+Thumbs.db
