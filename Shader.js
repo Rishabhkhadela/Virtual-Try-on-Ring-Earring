@@ -140,20 +140,125 @@ export function configureRenderer(renderer) {
 }
 
 // ============================================================
-// HDR environment — PMREM for PBR, raw equirect for the custom diamond shader
+// Rotate an equirect HDR around Y by `angleRadians`. We re-render the equirect
+// into a fresh HalfFloat render target, shifting U by angle/(2π). Result is a
+// new equirect texture that every downstream consumer (PMREM for metals,
+// CubeCamera seed, scene.background during cube capture, BVH shader's direct
+// envHDR sampling) can use without any per-path rotation logic — the rotation
+// is baked into the pixels once.
 // ============================================================
-export function loadHDREnvironment(renderer, scene, path) {
+function rotateEquirectY(renderer, srcTexture, angleRadians) {
+  if (!angleRadians) return srcTexture;
+  const w = (srcTexture.image?.width)  || 1024;
+  const h = (srcTexture.image?.height) || 512;
+  const rt = new THREE.WebGLRenderTarget(w, h, {
+    minFilter: THREE.LinearFilter,
+    magFilter: THREE.LinearFilter,
+    format: THREE.RGBAFormat,
+    type: THREE.HalfFloatType,   // preserve HDR range; float equirects routinely exceed 1.0
+    // Inherit the source's encoding so downstream PMREM / CubeCamera decode
+    // the rotated texture identically to the original. Default LinearEncoding
+    // was causing the ring's cube-reflected HDR to read dim — the RT ended up
+    // flagged as a different color space than the raw equirect it replaced.
+    encoding: srcTexture.encoding || THREE.LinearEncoding,
+    generateMipmaps: false,
+    wrapS: THREE.RepeatWrapping,
+    wrapT: THREE.ClampToEdgeWrapping,
+  });
+
+  // (Earlier version set rt.texture.image = {width, height} here thinking PMREM
+  // needed it — it doesn't, and that fake image object caused WebGL2 to throw
+  // "texSubImage2D: Overload resolution failed" every frame because Three.js
+  // tried to upload the texture from a non-DOM/non-ImageData source. Removed.)
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      tSrc:   { value: srcTexture },
+      uShift: { value: angleRadians / (2.0 * Math.PI) }
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() { vUv = uv; gl_Position = vec4(position, 1.0); }
+    `,
+    fragmentShader: `
+      uniform sampler2D tSrc;
+      uniform float uShift;
+      varying vec2 vUv;
+      void main() {
+        vec2 uv = vUv;
+        uv.x = fract(uv.x + uShift);
+        gl_FragColor = texture2D(tSrc, uv);
+      }
+    `,
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false,   // belt-and-suspenders — keep linear HDR values intact
+  });
+
+  const quadScene = new THREE.Scene();
+  const quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+  quadScene.add(quad);
+
+  // Save a broader slice of renderer state. ACES tonemap + sRGB outputEncoding
+  // from configureRenderer() were compressing HDR values on write to our RT,
+  // producing a darker rotated equirect than the source. Linear everything
+  // during this one-shot pass.
+  const prevRT             = renderer.getRenderTarget();
+  const prevAutoClear      = renderer.autoClear;
+  const prevToneMapping    = renderer.toneMapping;
+  const prevOutputEncoding = renderer.outputEncoding;
+
+  renderer.autoClear = true;
+  renderer.toneMapping = THREE.NoToneMapping;
+  renderer.outputEncoding = THREE.LinearEncoding;
+
+  renderer.setRenderTarget(rt);
+  renderer.render(quadScene, quadCam);
+
+  renderer.setRenderTarget(prevRT);
+  renderer.autoClear = prevAutoClear;
+  renderer.toneMapping = prevToneMapping;
+  renderer.outputEncoding = prevOutputEncoding;
+
+  quad.geometry.dispose();
+  mat.dispose();
+
+  // Present the RT texture as a drop-in equirect replacement. Do NOT set
+  // needsUpdate — render-target textures receive their pixels from the GPU
+  // pass above, not from a CPU-side .image source. Flagging them dirty
+  // makes Three.js repeatedly retry a broken CPU upload every frame.
+  rt.texture.mapping = THREE.EquirectangularReflectionMapping;
+  rt.texture.minFilter = THREE.LinearFilter;
+  rt.texture.magFilter = THREE.LinearFilter;
+  rt.texture.wrapS = THREE.RepeatWrapping;
+  rt.texture.wrapT = THREE.ClampToEdgeWrapping;
+  return rt.texture;
+}
+
+// ============================================================
+// HDR environment — PMREM for PBR, raw equirect for the custom diamond shader
+// opts.rotationY — optional Y-axis rotation in radians applied ONCE to the
+//   loaded equirect before PMREM generation. Rotates the entire IBL coherently
+//   across metals, diamonds, cube capture, and scene.background.
+// ============================================================
+export function loadHDREnvironment(renderer, scene, path, opts = {}) {
+  const rotationY = opts.rotationY || 0;
   return new Promise((resolve, reject) => {
     const loader = new THREE.RGBELoader();
     if (loader.setDataType) loader.setDataType(THREE.HalfFloatType);
 
-    loader.load(path, (texture) => {
-      texture.mapping = THREE.EquirectangularReflectionMapping;
-      texture.minFilter = THREE.LinearFilter;
-      texture.magFilter = THREE.LinearFilter;
-      texture.wrapS = THREE.RepeatWrapping;
-      texture.wrapT = THREE.ClampToEdgeWrapping;
-      texture.needsUpdate = true;
+    loader.load(path, (rawTexture) => {
+      rawTexture.mapping = THREE.EquirectangularReflectionMapping;
+      rawTexture.minFilter = THREE.LinearFilter;
+      rawTexture.magFilter = THREE.LinearFilter;
+      rawTexture.wrapS = THREE.RepeatWrapping;
+      rawTexture.wrapT = THREE.ClampToEdgeWrapping;
+      rawTexture.needsUpdate = true;
+
+      // Pre-rotate around Y so every downstream path sees the same rotated HDR
+      // without needing its own rotation logic.
+      const texture = rotateEquirectY(renderer, rawTexture, rotationY);
 
       const pmrem = new THREE.PMREMGenerator(renderer);
       pmrem.compileEquirectangularShader();
@@ -478,6 +583,7 @@ export function createDiamondBVHShaderMaterial(geometry, params = {}) {
     sparkleStrength = 1.0,
     brightness     = 1.5,
     color          = new THREE.Color(0xffffff),
+    fillAmount     = 0.0,
   } = params;
 
   const material = new THREE.ShaderMaterial({
@@ -506,6 +612,7 @@ export function createDiamondBVHShaderMaterial(geometry, params = {}) {
       uSparkle:   { value: sparkleStrength },
       uBrightness:{ value: brightness },
       uColor:     { value: color.clone() },
+      uFillAmount:{ value: Math.max(0, fillAmount) },
       uModelInv:  { value: new THREE.Matrix4() },
       uEnvTwist:  { value: new THREE.Matrix3() },
     },
@@ -555,6 +662,7 @@ export function createDiamondBVHShaderMaterial(geometry, params = {}) {
       uniform float uSparkle;
       uniform float uBrightness;
       uniform vec3  uColor;
+      uniform float uFillAmount;
       uniform mat4  uModelInv;
       uniform mat3  uEnvTwist;
 
@@ -680,6 +788,12 @@ export function createDiamondBVHShaderMaterial(geometry, params = {}) {
         // variation on cluster stones (they were reading bimodal, pure-white
         // or pure-dark, with no shading in between).
         col = pow(max(col, vec3(0.0)), vec3(2.0));
+
+        // Mobile fill compensation: when the bounce budget is lower, some
+        // facets lose secondary internal light. Lift only the darkest facets
+        // so the stone stays bright while preserving contrast and fire.
+        float fillMask = (1.0 - smoothstep(0.02, 0.20, dot(col, vec3(0.2126, 0.7152, 0.0722)))) * uFillAmount;
+        col += vec3(0.10, 0.105, 0.11) * fillMask;
 
         col *= uColor * uBrightness;
 
@@ -935,6 +1049,80 @@ export function createDiamondPhysicalMaterial(geometry, params = {}) {
 }
 
 // ============================================================
+// Metal presets — user-facing tint options for the ring/earring bands.
+// Values are perceptually tuned to look correct through ACES tonemap at
+// envMapIntensity ~1.8. Keep hex ≤0xffffff; use clearcoat to get the "polished"
+// look, not over-bright color.
+// ============================================================
+export const METAL_PRESETS = {
+  silver:      0xf5f5f8,   // white gold / platinum — very slight cool cast
+  gold:        0xffd89b,   // warm yellow gold (softer than raw 0xffd700 — ACES eats the saturation otherwise)
+  'rose-gold': 0xeec0b0,   // rose gold — pink-bronze blush
+};
+
+// Apply a preset (or raw hex) to every METAL material in a group. Diamond
+// materials are skipped (detected via userData marker + name). Color-only —
+// metalness / roughness / clearcoat are untouched, so a gold ring keeps the
+// same polish as silver.
+export function setMetalColor(group, preset) {
+  if (!group) return;
+  const hex = typeof preset === 'string' ? (METAL_PRESETS[preset] ?? 0xf5f5f8) : preset;
+  const color = new THREE.Color(hex);
+  group.traverse((node) => {
+    if (!node.isMesh || !node.material) return;
+    const mats = Array.isArray(node.material) ? node.material : [node.material];
+    for (const m of mats) {
+      if (!m || !m.color) continue;
+      // Skip diamond materials — they carry our diamondUniforms marker, or
+      // one of the three known diamond material names.
+      if (m.userData?.diamondUniforms || m.userData?.isDiamondBVH) continue;
+      if (m.name === 'diamond-bvh' || m.name === 'diamond-pbr' || m.name === 'diamond-shader') continue;
+      // Only touch true metals — skip anything non-metallic.
+      if (typeof m.metalness === 'number' && m.metalness < 0.5) continue;
+      m.color.copy(color);
+      // Keep the mobile emissive-lift tinted to the current metal color.
+      // Without this, picking gold while emissive was initialized as silver
+      // leaves the emissive shining silver light on top of the gold diffuse
+      // — the ring looks like gold with a silver halo. Copying color into
+      // emissive keeps the lift the same hue as the metal.
+      if (m.emissive) m.emissive.copy(color);
+      // Most jewelry GLBs ship with a baked-in albedo texture whose RGB
+      // encodes the metal's colour. MeshPhysicalMaterial's final albedo is
+      // color × map, so a gold-coloured map turns every color we set back
+      // into a slightly-tinted gold — the user sees "no change". Drop the
+      // map entirely when the user explicitly picks a metal preset so only
+      // our color decides the tint.
+      if (m.map) {
+        m.map = null;
+      }
+      // Force a genuinely new shader binary per color.
+      //
+      // Adreno / Mali / Xclipse / Apple mobile GPU drivers cache uniform
+      // state tied to the compiled program object. If two recompiles
+      // produce byte-identical GLSL, the driver sometimes links to the
+      // same program object and the old uniform cache remains live — so
+      // m.color.copy(goldColor) + m.needsUpdate=true updates the JS side
+      // but the GPU keeps drawing with the previously cached silver.
+      //
+      // `customProgramCacheKey` alone fails here because it only changes
+      // Three.js's JS-side cache — the driver sees identical source text
+      // and can still cache-hit. Injecting a `#define` that embeds the
+      // color's hex into the GLSL source guarantees the preprocessed
+      // shader is literally different per color → driver linker cannot
+      // cache-match → fresh program on GPU → fresh uniform state.
+      //
+      // The define is unused by the actual shader logic; it's purely a
+      // cache-buster. Zero runtime cost; compiles identically fast.
+      m.defines = Object.assign({}, m.defines || {}, {
+        METAL_COLOR_V: hex.toString(16)
+      });
+      m.customProgramCacheKey = () => `metal_${hex.toString(16)}`;
+      m.needsUpdate = true;
+    }
+  });
+}
+
+// ============================================================
 // applyJewelryShading
 // ============================================================
 export function applyJewelryShading(group, opts = {}) {
@@ -950,6 +1138,23 @@ export function applyJewelryShading(group, opts = {}) {
   let metalCount = 0;
   const diamondNames = [];
   const metalNames = [];
+
+  // Per-group material instancing. Cluster rings often contain many Mesh
+  // nodes that share the same BufferGeometry (GLTF instancing, cloned
+  // prongs, etc). Previously each such mesh got its OWN ShaderMaterial —
+  // which in three.js r146 means its own compiled WebGL program, its own
+  // uniform upload, and a full material-state change between draw calls.
+  //
+  // Keying the cache on geometry means two meshes with the same geometry
+  // share one material object → one program, one uniform block, one
+  // material-state change shared across draws. Saves 10-30% GPU time on
+  // cluster rings where half a dozen prongs are identical.
+  //
+  // Cache is scoped to this applyJewelryShading() call so different rings
+  // don't cross-pollute (each ring's shading settings are independent).
+  const bvhMaterialByGeom = new Map();
+  const pbrMaterialByGeom = new Map();
+  const shaderMaterialByGeom = new Map();
 
   group.traverse((node) => {
     if (!node.isMesh || !node.material) return;
@@ -967,52 +1172,72 @@ export function applyJewelryShading(group, opts = {}) {
           // Falls back to MeshPhysicalMaterial + sparkle overlay if BVH build
           // throws or the lib isn't loaded.
           if (_bvhLib && diamond.useBVH !== false) {
-            const bvhMat = createDiamondBVHShaderMaterial(node.geometry, {
-              ior:             diamond.ior,
-              bounces:         diamond.bounces,
-              fringeStrength:  diamond.fringeStrength,
-              sparkleStrength: diamond.sparkleStrength,
-              brightness:      diamond.envMapIntensity,
-              color:           diamond.color,
-            });
-            if (bvhMat) {
-              bvhMat.name = m.name || 'diamond-bvh';
-              // useCubeReflection=false → gem samples HDR for its reflection
-              // instead of the CubeCamera. Use this for any piece whose
-              // position doesn't match the cube's capture point (earrings,
-              // necklaces — cube lives at the ring).
-              if (diamond.useCubeReflection === false) {
-                bvhMat.uniforms.uUseCubeRefl.value = 0;
+            // Reuse if another mesh in this group already got a BVH material
+            // for this exact geometry (BVH struct is geometry-specific, so
+            // sharing is safe and avoids rebuilding the bounds hierarchy).
+            let bvhMat = bvhMaterialByGeom.get(node.geometry);
+            if (!bvhMat) {
+              bvhMat = createDiamondBVHShaderMaterial(node.geometry, {
+                ior:             diamond.ior,
+                bounces:         diamond.bounces,
+                fringeStrength:  diamond.fringeStrength,
+                sparkleStrength: diamond.sparkleStrength,
+                brightness:      diamond.envMapIntensity,
+                color:           diamond.color,
+                fillAmount:      diamond.fillAmount,
+              });
+              if (bvhMat) {
+                bvhMat.name = m.name || 'diamond-bvh';
+                // useCubeReflection=false → gem samples HDR for its reflection
+                // instead of the CubeCamera. Use this for any piece whose
+                // position doesn't match the cube's capture point (earrings,
+                // necklaces — cube lives at the ring).
+                if (diamond.useCubeReflection === false) {
+                  bvhMat.uniforms.uUseCubeRefl.value = 0;
+                }
+                bvhMaterialByGeom.set(node.geometry, bvhMat);
               }
-              return bvhMat;
             }
+            if (bvhMat) return bvhMat;
           }
 
-          return createDiamondPhysicalMaterial(node.geometry, {
-            transmission:        diamond.transmission,
-            ior:                 diamond.ior,
-            roughness:           diamond.roughness,
-            envMapIntensity:     diamond.envMapIntensity,
-            thickness:           diamond.thickness,
-            attenuationDistance: diamond.attenuationDistance,
-            attenuationColor:    diamond.attenuationColor,
-            clearcoatRoughness:  diamond.clearcoatRoughness,
-            dispersion:          diamond.dispersion,
-            color:               diamond.color,
-            sparkleStrength:     diamond.sparkleStrength,
-            fringeStrength:      diamond.fringeStrength,
-          });
+          // PBR fallback — also shared per geometry (thickness auto-derives
+          // from geometry bounds inside createDiamondPhysicalMaterial, so
+          // two identical geometries produce identical materials anyway).
+          let pbrMat = pbrMaterialByGeom.get(node.geometry);
+          if (!pbrMat) {
+            pbrMat = createDiamondPhysicalMaterial(node.geometry, {
+              transmission:        diamond.transmission,
+              ior:                 diamond.ior,
+              roughness:           diamond.roughness,
+              envMapIntensity:     diamond.envMapIntensity,
+              thickness:           diamond.thickness,
+              attenuationDistance: diamond.attenuationDistance,
+              attenuationColor:    diamond.attenuationColor,
+              clearcoatRoughness:  diamond.clearcoatRoughness,
+              dispersion:          diamond.dispersion,
+              color:               diamond.color,
+              sparkleStrength:     diamond.sparkleStrength,
+              fringeStrength:      diamond.fringeStrength,
+            });
+            pbrMaterialByGeom.set(node.geometry, pbrMat);
+          }
+          return pbrMat;
         }
 
-        const d = createDiamondShaderMaterial({
-          ior:             diamond.ior ?? 2.42,
-          dispersion:      diamond.dispersion ?? 0.08,
-          brightness:      diamond.envMapIntensity ?? 1.1,
-          color:           new THREE.Color(diamond.color ?? 0xffffff),
-          sparkleStrength: diamond.sparkleStrength ?? 1.2,
-          causticStrength: diamond.causticStrength ?? 0.5,
-        });
-        d.name = m.name || 'diamond-shader';
+        let d = shaderMaterialByGeom.get(node.geometry);
+        if (!d) {
+          d = createDiamondShaderMaterial({
+            ior:             diamond.ior ?? 2.42,
+            dispersion:      diamond.dispersion ?? 0.08,
+            brightness:      diamond.envMapIntensity ?? 1.1,
+            color:           new THREE.Color(diamond.color ?? 0xffffff),
+            sparkleStrength: diamond.sparkleStrength ?? 1.2,
+            causticStrength: diamond.causticStrength ?? 0.5,
+          });
+          d.name = m.name || 'diamond-shader';
+          shaderMaterialByGeom.set(node.geometry, d);
+        }
         // Render gems after opaque metal so transparent blending works correctly
         // (caller applies renderOrder on the group; per-material bump is safe here).
         return d;
@@ -1021,9 +1246,23 @@ export function applyJewelryShading(group, opts = {}) {
       metalCount++;
       metalNames.push(`${node.name || '?'} → ${m.name || '(unnamed)'}`);
       const originalIsMetallic = typeof m.metalness === 'number' ? m.metalness > 0.3 : true;
+      // metal.color (string preset or hex number) wins over the GLB's baked
+      // color — so the user's Silver/Gold/Rose-gold selection applies on load.
+      // If not provided, fall back to the GLB color, then to a safe gold default.
+      const metalColor = metal.color !== undefined
+        ? new THREE.Color(
+            typeof metal.color === 'string' ? (METAL_PRESETS[metal.color] ?? metal.color) : metal.color
+          )
+        : ((m.color && m.color.clone) ? m.color.clone() : new THREE.Color(0xffd700));
+      // If the user explicitly picked a metal preset, skip the GLB's baked
+      // albedo texture — otherwise MeshPhysicalMaterial would compute
+      // final = color × map, and a gold-coloured baked map would mute every
+      // color we set. Normal/roughness/metalness maps are still preserved for
+      // surface detail; only the color-carrying albedo is dropped.
+      const preserveAlbedoMap = metal.color === undefined;
       const newMat = new THREE.MeshPhysicalMaterial({
-        color:              (m.color && m.color.clone) ? m.color.clone() : new THREE.Color(0xffd700),
-        map:                m.map || null,
+        color:              metalColor,
+        map:                preserveAlbedoMap ? (m.map || null) : null,
         normalMap:          m.normalMap || null,
         roughnessMap:       m.roughnessMap || null,
         metalnessMap:       m.metalnessMap || null,
@@ -1032,8 +1271,46 @@ export function applyJewelryShading(group, opts = {}) {
         envMapIntensity:    metal.envMapIntensity   ?? 2.4,
         clearcoat:          metal.clearcoat         ?? 0.6,
         clearcoatRoughness: metal.clearcoatRoughness ?? 0.05,
+        // Optional emissive lift — used on mobile to ensure thin band geometry
+        // survives sub-pixel rasterization at the lower mobile pixel ratio.
+        // Set via metal.emissive / metal.emissiveIntensity by the caller;
+        // tinted to the metal color so the "lift" never reads as a different
+        // color (gold stays gold, silver stays silver, just slightly brighter).
+        emissive:           metal.emissive !== undefined
+                              ? new THREE.Color(metal.emissive)
+                              : metalColor.clone(),
+        emissiveIntensity:  metal.emissiveIntensity ?? 0,
       });
       newMat.name = m.name || 'metal';
+
+      // Subtle Ambient Occlusion / Base Darkening injection.
+      // Darkens pixels that are close to the center of the ring (the finger hole).
+      // This grounds the model and prevents the "floating" look.
+      newMat.onBeforeCompile = (shader) => {
+        shader.vertexShader = shader.vertexShader.replace(
+          '#include <common>',
+          `#include <common>
+           varying vec3 vAOPos;`
+        ).replace(
+          '#include <begin_vertex>',
+          `#include <begin_vertex>
+           vAOPos = position;`
+        );
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <common>',
+          `#include <common>
+           varying vec3 vAOPos;`
+        ).replace(
+          '#include <opaque_fragment>',
+          `#include <opaque_fragment>
+           // Ring hole is along the Y axis (normalized in buildRingGroup).
+           // Darken based on proximity to the central axis (XZ distance).
+           float aoDist = length(vAOPos.xz);
+           float ao = smoothstep(0.35, 0.55, aoDist);
+           gl_FragColor.rgb *= mix(0.65, 1.0, ao);`
+        );
+      };
+
       return newMat;
     });
 

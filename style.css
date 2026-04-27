@@ -56,8 +56,7 @@ body, html {
     top: 20px;
     right: 20px;
     z-index: 100;
-    background: rgba(15, 15, 15, 0.85);
-    backdrop-filter: blur(12px);
+    background: rgba(15, 15, 15, 0.92);
     padding: 24px;
     border-radius: 16px;
     border: 1px solid rgba(255, 255, 255, 0.1);
@@ -68,6 +67,67 @@ body, html {
     display: flex;
     flex-direction: column;
     gap: 12px;
+    /* Slide-out animation for the collapse/expand toggle. */
+    transform: translateX(0);
+    opacity: 1;
+    transition: transform 0.25s ease, opacity 0.2s ease;
+}
+
+/* Collapsed state — panel slides off-screen to the right and fades out.
+   pointer-events disabled so it can't eat taps while hidden. */
+#ui-panel.ui-panel-collapsed {
+    transform: translateX(calc(100% + 40px));
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* Floating gear button that toggles the panel. Stays visible on top of the
+   video feed at all times; moves with the panel's collapse state so it
+   doesn't overlap the panel when expanded. */
+#ui-toggle {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    z-index: 101;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(15, 15, 15, 0.92);
+    color: #4a9eff;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+    transition: right 0.25s ease, transform 0.25s ease, background 0.2s ease;
+}
+
+#ui-toggle:hover, #ui-toggle:focus {
+    background: rgba(30, 30, 30, 0.9);
+    outline: none;
+}
+
+/* When panel is expanded: button stays in place (right:20px) but rotates a
+   quarter turn as an "open" affordance, and gets a higher z-index so it
+   floats on top of the panel header — user always has a tap target to close
+   the panel. Toggled via body class by main.js to avoid sibling-selector
+   pitfalls with the current DOM order. */
+body.ui-panel-open #ui-toggle {
+    z-index: 102;
+    transform: rotate(90deg);
+    color: #fff;
+}
+
+/* Mobile: make the panel use the full width of the container so its contents
+   don't get squeezed when the viewport is narrow. Button still floats in the
+   top-right over the panel. */
+@media (max-width: 600px) {
+    #ui-panel {
+        width: calc(100% - 40px);
+        right: 20px;
+        left: auto;
+    }
 }
 
 #ui-panel h3 {
@@ -189,8 +249,7 @@ body, html {
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    background: rgba(15, 15, 15, 0.9);
-    backdrop-filter: blur(8px);
+    background: rgba(15, 15, 15, 0.94);
     padding: 20px 40px;
     border-radius: 12px;
     border: 1px solid rgba(255, 255, 255, 0.1);
@@ -198,9 +257,277 @@ body, html {
     transition: opacity 0.5s ease;
 }
 
+/* Pose-quality hint — floats center-screen when the hand is in a side-view
+   pose where the ring can't be placed believably. Starts hidden (opacity 0,
+   pointer-events none) and JS toggles the .visible class to fade it in.
+   Sits above the 3D canvas (z-index 20) but below UI panels (100+). */
+#pose-hint {
+    position: absolute;
+    top: 42%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    padding: 16px 22px;
+    background: rgba(15, 15, 15, 0.82);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 14px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+    color: #f3f7ff;
+    text-align: center;
+    pointer-events: none;
+    z-index: 20;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+    max-width: 70%;
+}
+
+#pose-hint.visible {
+    opacity: 1;
+}
+
+.pose-hint-icon {
+    color: #4a9eff;
+    line-height: 0;
+}
+
+.pose-hint-text {
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.2px;
+    line-height: 1.35;
+}
+
+@media (max-width: 600px) {
+    #pose-hint {
+        top: 38%;
+        padding: 12px 18px;
+        gap: 8px;
+    }
+    .pose-hint-text {
+        font-size: 12px;
+    }
+}
+
 @media (max-width: 600px) {
     .mirror-container {
         width: 100vw;
         border-radius: 0;
     }
+}
+
+/* ---------- Product picker (bottom overlay) ---------- */
+#product-picker {
+    position: absolute;
+    left: 50%;
+    bottom: 16px;
+    transform: translateX(-50%);
+    z-index: 90;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 18px 10px;
+    background: rgba(15, 15, 15, 0.84);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 20px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+    max-width: calc(100% - 32px);
+}
+
+#product-thumbs {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding: 2px;
+    max-width: 100%;
+    scrollbar-width: none;
+}
+#product-thumbs::-webkit-scrollbar { display: none; }
+
+.product-thumb {
+    flex: 0 0 auto;
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.15);
+    background: rgba(255, 255, 255, 0.92);
+    color: #222;
+    font-size: 9px;
+    font-weight: 600;
+    line-height: 1.1;
+    text-align: center;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 3px;
+    box-sizing: border-box;
+    transition: transform 0.15s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+    overflow: hidden;
+}
+
+.product-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
+    pointer-events: none;
+    user-select: none;
+}
+
+.product-thumb:hover {
+    transform: translateY(-2px);
+    border-color: rgba(255, 255, 255, 0.35);
+}
+
+.product-thumb.active {
+    width: 56px;
+    height: 56px;
+    border-color: #fff;
+    box-shadow: 0 0 0 3px rgba(74, 158, 255, 0.4), 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+
+#product-categories {
+    display: flex;
+    gap: 24px;
+    align-items: flex-end;
+    justify-content: center;
+}
+
+.category-btn {
+    background: transparent;
+    border: 0;
+    color: rgba(255, 255, 255, 0.55);
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 2px 6px;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.3px;
+    transition: color 0.2s ease, transform 0.15s ease;
+}
+
+.category-btn svg { width: 22px; height: 22px; }
+
+.category-btn:hover {
+    color: rgba(255, 255, 255, 0.85);
+}
+
+.category-btn.active {
+    color: #fff;
+    transform: translateY(-1px);
+}
+
+.category-btn.active svg {
+    filter: drop-shadow(0 0 6px rgba(74, 158, 255, 0.6));
+}
+
+/* ---------- Metal picker (top-left, compact horizontal pill) ----------
+   Symmetric with the gear button in the top-right. Horizontal layout so it
+   consumes the LEAST vertical space possible and leaves the center of the
+   frame — where the face + hand actually live — completely clear. */
+#metal-picker {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    z-index: 91;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 10px 6px 8px;
+    background: rgba(15, 15, 15, 0.84);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5);
+}
+
+#metal-swatches {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: center;
+}
+
+.metal-swatch {
+    flex: 0 0 auto;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.15);
+    cursor: pointer;
+    padding: 0;
+    transition: transform 0.15s ease, border-color 0.2s ease, box-shadow 0.2s ease, width 0.15s ease, height 0.15s ease;
+    background: radial-gradient(circle at 32% 28%, #ffffff 0%, #dadadf 35%, #7a7a85 100%);
+}
+
+.metal-swatch[data-preset="silver"] {
+    background: radial-gradient(circle at 32% 28%, #ffffff 0%, #e2e2e8 35%, #7c7c88 100%);
+}
+.metal-swatch[data-preset="gold"] {
+    background: radial-gradient(circle at 32% 28%, #fff2b8 0%, #ffd89b 35%, #a8762c 100%);
+}
+.metal-swatch[data-preset="rose-gold"] {
+    background: radial-gradient(circle at 32% 28%, #fbe5da 0%, #eec0b0 35%, #a36358 100%);
+}
+
+.metal-swatch:hover {
+    transform: translateY(-1px);
+    border-color: rgba(255, 255, 255, 0.35);
+}
+
+.metal-swatch.active {
+    width: 36px;
+    height: 36px;
+    border-color: #fff;
+    box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.5), 0 4px 10px rgba(0, 0, 0, 0.45);
+}
+
+.picker-tab-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: center;
+}
+
+.metal-tab {
+    background: rgba(255, 255, 255, 0.95);
+    border: 0;
+    color: #111;
+    padding: 4px 12px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    cursor: default;
+}
+
+@media (max-width: 600px) {
+    #metal-picker {
+        top: 14px;
+        left: 14px;
+        gap: 8px;
+        padding: 5px 8px 5px 6px;
+    }
+    .metal-swatch { width: 26px; height: 26px; }
+    .metal-swatch.active { width: 32px; height: 32px; }
+    .metal-tab { font-size: 10px; padding: 3px 10px; }
+    #product-picker {
+        bottom: 10px;
+        padding: 10px 14px 9px;
+        gap: 8px;
+    }
+    .product-thumb { width: 40px; height: 40px; }
+    .product-thumb.active { width: 48px; height: 48px; }
+    #product-categories { gap: 18px; }
+    .category-btn { font-size: 10px; }
+    .category-btn svg { width: 20px; height: 20px; }
 }
