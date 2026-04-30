@@ -430,6 +430,30 @@ body.ui-panel-open #ui-toggle {
     filter: drop-shadow(0 0 6px rgba(74, 158, 255, 0.6));
 }
 
+.quick-toggle-btn {
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
+    border-radius: 999px;
+    padding: 6px 14px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+    cursor: pointer;
+    transition: background 0.2s ease, border-color 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
+}
+
+.quick-toggle-btn:hover {
+    transform: translateY(-1px);
+    border-color: rgba(255, 255, 255, 0.35);
+}
+
+.quick-toggle-btn.active {
+    background: rgba(74, 158, 255, 0.28);
+    border-color: rgba(147, 198, 255, 0.9);
+    box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.25);
+}
+
 /* ---------- Metal picker (top-left, compact horizontal pill) ----------
    Symmetric with the gear button in the top-right. Horizontal layout so it
    consumes the LEAST vertical space possible and leaves the center of the
@@ -530,4 +554,5 @@ body.ui-panel-open #ui-toggle {
     #product-categories { gap: 18px; }
     .category-btn { font-size: 10px; }
     .category-btn svg { width: 20px; height: 20px; }
+    .quick-toggle-btn { font-size: 10px; padding: 5px 12px; }
 }

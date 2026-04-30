@@ -149,7 +149,7 @@ export function configureRenderer(renderer) {
 // ============================================================
 function rotateEquirectY(renderer, srcTexture, angleRadians) {
   if (!angleRadians) return srcTexture;
-  const w = (srcTexture.image?.width)  || 1024;
+  const w = (srcTexture.image?.width) || 1024;
   const h = (srcTexture.image?.height) || 512;
   const rt = new THREE.WebGLRenderTarget(w, h, {
     minFilter: THREE.LinearFilter,
@@ -173,7 +173,7 @@ function rotateEquirectY(renderer, srcTexture, angleRadians) {
 
   const mat = new THREE.ShaderMaterial({
     uniforms: {
-      tSrc:   { value: srcTexture },
+      tSrc: { value: srcTexture },
       uShift: { value: angleRadians / (2.0 * Math.PI) }
     },
     vertexShader: `
@@ -204,9 +204,9 @@ function rotateEquirectY(renderer, srcTexture, angleRadians) {
   // from configureRenderer() were compressing HDR values on write to our RT,
   // producing a darker rotated equirect than the source. Linear everything
   // during this one-shot pass.
-  const prevRT             = renderer.getRenderTarget();
-  const prevAutoClear      = renderer.autoClear;
-  const prevToneMapping    = renderer.toneMapping;
+  const prevRT = renderer.getRenderTarget();
+  const prevAutoClear = renderer.autoClear;
+  const prevToneMapping = renderer.toneMapping;
   const prevOutputEncoding = renderer.outputEncoding;
 
   renderer.autoClear = true;
@@ -288,9 +288,9 @@ export function setDiamondDetectionPattern(regex) {
 // the ring's current world rotation; this multiplies the angle × 2 internally
 // and updates every diamond material's uEnvTwist uniform so sparkle moves
 // faster than the ring. Call from animate() after ringModel.quaternion.slerp.
-const _scratchEuler   = new THREE.Euler();
-const _scratchMat4    = new THREE.Matrix4();
-const _scratchTwist3  = new THREE.Matrix3();
+const _scratchEuler = new THREE.Euler();
+const _scratchMat4 = new THREE.Matrix4();
+const _scratchTwist3 = new THREE.Matrix3();
 export function updateDiamondEnvTwist(group, quatOrNull) {
   if (!group) return;
   if (quatOrNull) {
@@ -320,24 +320,24 @@ export function updateDiamondEnvTwist(group, quatOrNull) {
 export function createDiamondShaderMaterial(params = {}) {
   const {
     ior = 2.42,
-    dispersion = 0.12,         // aberrationStrength — stronger default = more visible fire
+    dispersion = 0,         // aberrationStrength — stronger default = more visible fire
     brightness = 2.8,          // HDR boost so facet peaks push past bloom threshold (1.25)
     color = new THREE.Color(0xffffff),
-    sparkleStrength = 1.5,     // multiplier on the facet-edge scintillation
+    sparkleStrength = 0,     // multiplier on the facet-edge scintillation
     causticStrength = 0.5,     // how much the multi-jitter max samples contribute (brilliance)
   } = params;
 
   const material = new THREE.ShaderMaterial({
     uniforms: {
       // samplerCube — dynamic cube from main.js CubeCamera (metal + HDR sky).
-      envMap:             { value: _dynamicEnvCubeTexture || getFallbackCube() },
-      ior:                { value: ior },
+      envMap: { value: _dynamicEnvCubeTexture || getFallbackCube() },
+      ior: { value: ior },
       aberrationStrength: { value: dispersion },
-      brightness:         { value: brightness },
-      color:              { value: color.clone() },
-      envRotation:        { value: new THREE.Matrix3() },
-      sparkleStrength:    { value: sparkleStrength },
-      causticStrength:    { value: causticStrength },
+      brightness: { value: brightness },
+      color: { value: color.clone() },
+      envRotation: { value: new THREE.Matrix3() },
+      sparkleStrength: { value: sparkleStrength },
+      causticStrength: { value: causticStrength },
     },
     extensions: {
       derivatives: true,  // dFdx/dFdy for facet-edge sparkle (GL_OES_standard_derivatives)
@@ -544,9 +544,9 @@ function autoThickness(geometry) {
   return THREE.MathUtils.clamp(dim * 0.5, 0.1, 5.0);
 }
 
-const _SUPPORTS_THICKNESS   = _REVISION >= 129;
+const _SUPPORTS_THICKNESS = _REVISION >= 129;
 const _SUPPORTS_ATTEN_COLOR = _REVISION >= 131;
-const _SUPPORTS_DISPERSION  = _REVISION >= 162;
+const _SUPPORTS_DISPERSION = _REVISION >= 162;
 
 // ============================================================
 // Diamond — BVH ray-traced ShaderMaterial (GLSL3, pure)
@@ -577,13 +577,13 @@ export function createDiamondBVHShaderMaterial(geometry, params = {}) {
   bvhStruct.updateFrom(bvh);
 
   const {
-    ior            = 2.417,
-    bounces        = 5,              // +1 bounce → richer internal reflection variety
+    ior = 2.417,
+    bounces = 5,              // +1 bounce → richer internal reflection variety
     fringeStrength = 0.12,
     sparkleStrength = 1.0,
-    brightness     = 1.5,
-    color          = new THREE.Color(0xffffff),
-    fillAmount     = 0.0,
+    brightness = 1.5,
+    color = new THREE.Color(0xffffff),
+    fillAmount = 0.0,
   } = params;
 
   const material = new THREE.ShaderMaterial({
@@ -591,30 +591,30 @@ export function createDiamondBVHShaderMaterial(geometry, params = {}) {
     uniforms: {
       // Dynamic cube map from main.js CubeCamera — contains metal prongs + HDR
       // sky. Used by REFLECTION (refl) sampling so the gem reflects its mounting.
-      envMap:     { value: _dynamicEnvCubeTexture || getFallbackCube() },
+      envMap: { value: _dynamicEnvCubeTexture || getFallbackCube() },
       // Clean HDR equirect — used by REFRACTION-exit sampling so rays that left
       // the gem see the studio sky, not an adjacent cluster gem's dark back.
       // Read current module state (not hardcoded fallback): materials created
       // AFTER HDR loads — e.g. the earring, which comes in via MediaPipe setup
       // long after the ring — would otherwise miss setDiamondEnvHDR's one-shot
       // update and sample the wrong-perspective cube, going dark.
-      envHDR:     { value: _dynamicEnvHDRTexture || _fallbackEnvTexture },
-      uUseHDR:    { value: _dynamicEnvHDRTexture ? 1 : 0 },
+      envHDR: { value: _dynamicEnvHDRTexture || _fallbackEnvTexture },
+      uUseHDR: { value: _dynamicEnvHDRTexture ? 1 : 0 },
       // 1 = reflection samples the CubeCamera (good for ring — gets prong lines).
       // 0 = reflection samples HDR instead (for earrings or any piece where the
       // cube is captured from the wrong position; otherwise the gem body goes
       // dark because the cube data is from a different place in the scene).
-      uUseCubeRefl:{ value: 1 },
-      uBVH:       { value: bvhStruct },
-      uBounces:   { value: Math.min(8, Math.max(1, Math.floor(bounces))) },
-      uIOR:       { value: ior },
-      uFringe:    { value: fringeStrength },
-      uSparkle:   { value: sparkleStrength },
-      uBrightness:{ value: brightness },
-      uColor:     { value: color.clone() },
-      uFillAmount:{ value: Math.max(0, fillAmount) },
-      uModelInv:  { value: new THREE.Matrix4() },
-      uEnvTwist:  { value: new THREE.Matrix3() },
+      uUseCubeRefl: { value: 1 },
+      uBVH: { value: bvhStruct },
+      uBounces: { value: Math.min(8, Math.max(1, Math.floor(bounces))) },
+      uIOR: { value: ior },
+      uFringe: { value: fringeStrength },
+      uSparkle: { value: sparkleStrength },
+      uBrightness: { value: brightness },
+      uColor: { value: color.clone() },
+      uFillAmount: { value: Math.max(0, fillAmount) },
+      uModelInv: { value: new THREE.Matrix4() },
+      uEnvTwist: { value: new THREE.Matrix3() },
     },
     vertexShader: /* glsl */ `
       out vec3 vWorldPos;
@@ -874,24 +874,24 @@ export function createDiamondPhysicalMaterial(geometry, params = {}) {
   // fringes at facet edges (user tuning request — marks the "fire" sweet spot).
   const iorValue = params.ior ?? 2.417;
   const sparkleStrength = params.sparkleStrength ?? 0.85;
-  const fringeStrength  = params.fringeStrength  ?? 0.30;
+  const fringeStrength = params.fringeStrength ?? 0.30;
 
   const mat = new THREE.MeshPhysicalMaterial({
-    color:              new THREE.Color(params.color ?? 0xffffff),
-    metalness:          0.0,
-    roughness:          params.roughness ?? 0.0,     // must stay 0 for sharp facet highlights
-    transmission:       params.transmission ?? 0.9,
-    ior:                iorValue,
-    envMapIntensity:    params.envMapIntensity ?? 1.6, // peak-attraction tuning
-    clearcoat:          0.0,
+    color: new THREE.Color(params.color ?? 0xffffff),
+    metalness: 0.0,
+    roughness: params.roughness ?? 0.0,     // must stay 0 for sharp facet highlights
+    transmission: params.transmission ?? 0.9,
+    ior: iorValue,
+    envMapIntensity: params.envMapIntensity ?? 1.6, // peak-attraction tuning
+    clearcoat: 0.0,
     clearcoatRoughness: params.clearcoatRoughness ?? 0.0,
-    emissive:           new THREE.Color(0xffffff),
-    emissiveIntensity:  params.emissiveIntensity ?? 0.0,
+    emissive: new THREE.Color(0xffffff),
+    emissiveIntensity: params.emissiveIntensity ?? 0.0,
     // transparent:false + transmission>0 → Three.js routes this material through
     // the transmission render pass, where it samples the opaque backdrop RT
     // with IOR-offset UVs. That's how real refraction through the hand works.
-    transparent:        false,
-    side:               THREE.FrontSide,
+    transparent: false,
+    side: THREE.FrontSide,
   });
 
   // MeshPhysicalMaterial.transmission gives us the hand refracted through the
@@ -901,9 +901,9 @@ export function createDiamondPhysicalMaterial(geometry, params = {}) {
   // because MeshPhysicalMaterial + glslVersion:GLSL3 is broken on r146.
   mat.userData.diamondUniforms = {
     uDiamondSparkle: { value: sparkleStrength },
-    uDiamondFringe:  { value: fringeStrength },
-    uDiamondIOR:     { value: iorValue },
-    uEnvTwist:       { value: new THREE.Matrix3() },
+    uDiamondFringe: { value: fringeStrength },
+    uDiamondIOR: { value: iorValue },
+    uEnvTwist: { value: new THREE.Matrix3() },
   };
 
   mat.onBeforeCompile = (shader) => {
@@ -1055,8 +1055,8 @@ export function createDiamondPhysicalMaterial(geometry, params = {}) {
 // look, not over-bright color.
 // ============================================================
 export const METAL_PRESETS = {
-  silver:      0xf5f5f8,   // white gold / platinum — very slight cool cast
-  gold:        0xffd89b,   // warm yellow gold (softer than raw 0xffd700 — ACES eats the saturation otherwise)
+  silver: 0xf5f5f8,   // white gold / platinum — very slight cool cast
+  gold: 0xffd89b,   // warm yellow gold (softer than raw 0xffd700 — ACES eats the saturation otherwise)
   'rose-gold': 0xeec0b0,   // rose gold — pink-bronze blush
 };
 
@@ -1178,13 +1178,13 @@ export function applyJewelryShading(group, opts = {}) {
             let bvhMat = bvhMaterialByGeom.get(node.geometry);
             if (!bvhMat) {
               bvhMat = createDiamondBVHShaderMaterial(node.geometry, {
-                ior:             diamond.ior,
-                bounces:         diamond.bounces,
-                fringeStrength:  diamond.fringeStrength,
+                ior: diamond.ior,
+                bounces: diamond.bounces,
+                fringeStrength: diamond.fringeStrength,
                 sparkleStrength: diamond.sparkleStrength,
-                brightness:      diamond.envMapIntensity,
-                color:           diamond.color,
-                fillAmount:      diamond.fillAmount,
+                brightness: diamond.envMapIntensity,
+                color: diamond.color,
+                fillAmount: diamond.fillAmount,
               });
               if (bvhMat) {
                 bvhMat.name = m.name || 'diamond-bvh';
@@ -1207,18 +1207,18 @@ export function applyJewelryShading(group, opts = {}) {
           let pbrMat = pbrMaterialByGeom.get(node.geometry);
           if (!pbrMat) {
             pbrMat = createDiamondPhysicalMaterial(node.geometry, {
-              transmission:        diamond.transmission,
-              ior:                 diamond.ior,
-              roughness:           diamond.roughness,
-              envMapIntensity:     diamond.envMapIntensity,
-              thickness:           diamond.thickness,
+              transmission: diamond.transmission,
+              ior: diamond.ior,
+              roughness: diamond.roughness,
+              envMapIntensity: diamond.envMapIntensity,
+              thickness: diamond.thickness,
               attenuationDistance: diamond.attenuationDistance,
-              attenuationColor:    diamond.attenuationColor,
-              clearcoatRoughness:  diamond.clearcoatRoughness,
-              dispersion:          diamond.dispersion,
-              color:               diamond.color,
-              sparkleStrength:     diamond.sparkleStrength,
-              fringeStrength:      diamond.fringeStrength,
+              attenuationColor: diamond.attenuationColor,
+              clearcoatRoughness: diamond.clearcoatRoughness,
+              dispersion: diamond.dispersion,
+              color: diamond.color,
+              sparkleStrength: diamond.sparkleStrength,
+              fringeStrength: diamond.fringeStrength,
             });
             pbrMaterialByGeom.set(node.geometry, pbrMat);
           }
@@ -1228,10 +1228,10 @@ export function applyJewelryShading(group, opts = {}) {
         let d = shaderMaterialByGeom.get(node.geometry);
         if (!d) {
           d = createDiamondShaderMaterial({
-            ior:             diamond.ior ?? 2.42,
-            dispersion:      diamond.dispersion ?? 0.08,
-            brightness:      diamond.envMapIntensity ?? 1.1,
-            color:           new THREE.Color(diamond.color ?? 0xffffff),
+            ior: diamond.ior ?? 2.42,
+            dispersion: diamond.dispersion ?? 0.08,
+            brightness: diamond.envMapIntensity ?? 1.1,
+            color: new THREE.Color(diamond.color ?? 0xffffff),
             sparkleStrength: diamond.sparkleStrength ?? 1.2,
             causticStrength: diamond.causticStrength ?? 0.5,
           });
@@ -1251,8 +1251,8 @@ export function applyJewelryShading(group, opts = {}) {
       // If not provided, fall back to the GLB color, then to a safe gold default.
       const metalColor = metal.color !== undefined
         ? new THREE.Color(
-            typeof metal.color === 'string' ? (METAL_PRESETS[metal.color] ?? metal.color) : metal.color
-          )
+          typeof metal.color === 'string' ? (METAL_PRESETS[metal.color] ?? metal.color) : metal.color
+        )
         : ((m.color && m.color.clone) ? m.color.clone() : new THREE.Color(0xffd700));
       // If the user explicitly picked a metal preset, skip the GLB's baked
       // albedo texture — otherwise MeshPhysicalMaterial would compute
@@ -1261,25 +1261,25 @@ export function applyJewelryShading(group, opts = {}) {
       // surface detail; only the color-carrying albedo is dropped.
       const preserveAlbedoMap = metal.color === undefined;
       const newMat = new THREE.MeshPhysicalMaterial({
-        color:              metalColor,
-        map:                preserveAlbedoMap ? (m.map || null) : null,
-        normalMap:          m.normalMap || null,
-        roughnessMap:       m.roughnessMap || null,
-        metalnessMap:       m.metalnessMap || null,
-        metalness:          metal.metalness         ?? (originalIsMetallic ? 1.0 : 0.0),
-        roughness:          metal.roughness         ?? 0.08,
-        envMapIntensity:    metal.envMapIntensity   ?? 2.4,
-        clearcoat:          metal.clearcoat         ?? 0.6,
+        color: metalColor,
+        map: preserveAlbedoMap ? (m.map || null) : null,
+        normalMap: m.normalMap || null,
+        roughnessMap: m.roughnessMap || null,
+        metalnessMap: m.metalnessMap || null,
+        metalness: metal.metalness ?? (originalIsMetallic ? 1.0 : 0.0),
+        roughness: metal.roughness ?? 0.08,
+        envMapIntensity: metal.envMapIntensity ?? 2.4,
+        clearcoat: metal.clearcoat ?? 0.6,
         clearcoatRoughness: metal.clearcoatRoughness ?? 0.05,
         // Optional emissive lift — used on mobile to ensure thin band geometry
         // survives sub-pixel rasterization at the lower mobile pixel ratio.
         // Set via metal.emissive / metal.emissiveIntensity by the caller;
         // tinted to the metal color so the "lift" never reads as a different
         // color (gold stays gold, silver stays silver, just slightly brighter).
-        emissive:           metal.emissive !== undefined
-                              ? new THREE.Color(metal.emissive)
-                              : metalColor.clone(),
-        emissiveIntensity:  metal.emissiveIntensity ?? 0,
+        emissive: metal.emissive !== undefined
+          ? new THREE.Color(metal.emissive)
+          : metalColor.clone(),
+        emissiveIntensity: metal.emissiveIntensity ?? 0,
       });
       newMat.name = m.name || 'metal';
 

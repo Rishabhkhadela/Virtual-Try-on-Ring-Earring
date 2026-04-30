@@ -103,10 +103,37 @@
             <label class="debug-toggle">
                 <input type="checkbox" id="showRingAxes"> Show Ring Axes
             </label>
+            <label class="debug-toggle">
+                <input type="checkbox" id="showPoseDebug"> Show Pose Debug
+            </label>
+            <label class="debug-toggle">
+                <input type="checkbox" id="showRiggedHand"> Show Rigged Hand
+            </label>
             <div class="finger-picker">
                 <span id="activeFingerLabel">Finger: Ring</span>
                 <button id="cycleFingerBtn" type="button">Cycle Finger</button>
             </div>
+            <label style="display: flex; align-items: center;">Anchor: <input type="range" id="ringAnchorT" min="0"
+                    max="1" step="0.01" value="0.5" style="flex:1; margin: 0 10px;"
+                    oninput="document.getElementById('numRingAnchorT').value = this.value"><input type="number"
+                    id="numRingAnchorT" value="0.5" step="0.01"
+                    oninput="document.getElementById('ringAnchorT').value = this.value"></label>
+            <label style="display: flex; align-items: center;">Pos X: <input type="range" id="ringOffsetX" min="-1"
+                    max="1" step="0.01" value="0" style="flex:1; margin: 0 10px;"
+                    oninput="document.getElementById('numRingOffsetX').value = this.value"><input type="number"
+                    id="numRingOffsetX" value="0" step="0.01"
+                    oninput="document.getElementById('ringOffsetX').value = this.value"></label>
+            <label style="display: flex; align-items: center;">Pos Y: <input type="range" id="ringOffsetY" min="-1"
+                    max="1" step="0.01" value="0" style="flex:1; margin: 0 10px;"
+                    oninput="document.getElementById('numRingOffsetY').value = this.value"><input type="number"
+                    id="numRingOffsetY" value="0" step="0.01"
+                    oninput="document.getElementById('ringOffsetY').value = this.value"></label>
+            <label style="display: flex; align-items: center;">Pos Z: <input type="range" id="ringOffsetZ" min="-1"
+                    max="1" step="0.01" value="0" style="flex:1; margin: 0 10px;"
+                    oninput="document.getElementById('numRingOffsetZ').value = this.value"><input type="number"
+                    id="numRingOffsetZ" value="0" step="0.01"
+                    oninput="document.getElementById('ringOffsetZ').value = this.value"></label>
+            <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.1); margin: 8px 0;">
             <label style="display: flex; align-items: center;">Rot X: <input type="range" id="rotX" min="-180" max="180"
                     value="73" style="flex:1; margin: 0 10px;"
                     oninput="document.getElementById('numX').value = this.value"><input type="number" id="numX"
@@ -228,8 +255,32 @@
                     <span>Earrings</span>
                 </button>
             </div>
+            <button id="toggleHandMeshBtn" class="quick-toggle-btn" type="button" aria-pressed="false">
+                Skin Mesh Off
+            </button>
         </div>
     </div>
+
+    <!-- Pose diagnostic HUD (toggled by #showPoseDebug). Pure read-only;
+         no tracking math runs here, the data is sampled from the live
+         classifier and printed each frame. -->
+    <div id="poseDebugHud" style="
+        display: none;
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        z-index: 9999;
+        background: rgba(0, 0, 0, 0.78);
+        color: #d4ffe8;
+        font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        padding: 10px 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(255,255,255,0.12);
+        pointer-events: none;
+        white-space: pre;
+        min-width: 240px;
+        text-shadow: 0 1px 0 rgba(0,0,0,0.6);
+    "></div>
 
     <!-- main.js module -->
     <script type="module" src="main.js"></script>

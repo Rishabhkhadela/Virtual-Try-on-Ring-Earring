@@ -10,6 +10,7 @@ import {
   OneEuroFilterVec3, OneEuroFilterQuat, OneEuroFilterScalar
 } from './faceTracking.js';
 import { configureRenderer, loadHDREnvironment, applyJewelryShading, updateDiamondEnvTwist, setDiamondEnvCube, setDiamondEnvHDR, setMetalColor } from './Shader.js';
+import { initializeHandOccluder } from './handOccluder.js';
 
 // --- DOM Elements ---
 const videoElement = document.getElementById('input_video');
@@ -412,21 +413,653 @@ occluderMesh.renderOrder = -1;
 scene.add(occluderMesh);
 
 const blockerOccluderMeshes = [];
+const HAND_OCCLUDER_ASSETS = {
+  Left: 'assets/hand/LeftHandAndroidXRVisual.glb',
+  Right: 'assets/hand/RightHandAndroidXRVisual.glb',
+};
+const handOccluders = new Map();
+
+for (const [handedness, assetPath] of Object.entries(HAND_OCCLUDER_ASSETS)) {
+  initializeHandOccluder({
+    scene,
+    assetPath,
+    procedural: true,
+    debug: !!document.getElementById('showHandMesh')?.checked,
+    mapToScene: (point2D, out) => mapToOrthographicSpaceInto(out, point2D),
+    log,
+  }).then((controller) => {
+    handOccluders.set(handedness, controller);
+  }).catch((error) => {
+    log(`[HandOccluder] Failed to initialize ${handedness} hand: ${error?.message || error}`);
+  });
+}
+
+function getReportedHandedness(results) {
+  return results?.handednesses?.[0]?.[0]?.categoryName === 'Right' ? 'Right' : 'Left';
+}
+
+function getHandOccluderForResults(results) {
+  return handOccluders.get(getReportedHandedness(results)) || null;
+}
+
+function hideHandOccluders(except = null) {
+  for (const controller of handOccluders.values()) {
+    if (controller !== except) controller.hide();
+  }
+}
+
+// =========================================================================
+// PR-α: Rigged-hand bone driver (debug-only, additive)
+// -------------------------------------------------------------------------
+// Loads LeftHandAndroidXRVisual.glb / RightHandAndroidXRVisual.glb,
+// resolves their finger bones by name, and drives bone world positions
+// from MediaPipe landmarks every frame. Renders as wireframe so it can
+// be visually verified against the real hand before we depend on it for
+// occlusion (PR-β) or ring parenting (PR-γ).
+//
+// IMPORTANT: This system does NOT replace the existing occluder, does NOT
+// change ring placement, and does NOT mutate any tracking math. It only
+// renders an additional debug mesh when "Show Rigged Hand" is checked.
+// =========================================================================
+
+// Bone-name → MediaPipe landmark index map. The hand GLBs follow a
+// consistent naming convention: {prefix}_{Finger}{Joint}, prefix = L/R.
+// The verts are skinned to these bones, so setting each bone's WORLD
+// position to the corresponding landmark's scene position deforms the
+// surface to follow the real hand.
+const RIGGED_BONE_TO_LANDMARK = {
+  // Wrist
+  Wrist: 0,
+  // Thumb: MP=1, IP=2, DIP=3, TIP=4
+  ThumbMetacarpal: 1,
+  ThumbProximal: 2,
+  ThumbDistal: 3,
+  // Index: MCP=5, PIP=6, DIP=7, TIP=8
+  IndexMetacarpal: 5,
+  IndexProximal: 6,
+  IndexIntermediate: 7,
+  IndexDistal: 8,
+  // Middle: 9 / 10 / 11 / 12
+  MiddleMetacarpal: 9,
+  MiddleProximal: 10,
+  MiddleIntermediate: 11,
+  MiddleDistal: 12,
+  // Ring: 13 / 14 / 15 / 16
+  RingMetacarpal: 13,
+  RingProximal: 14,
+  RingIntermediate: 15,
+  RingDistal: 16,
+  // Little / pinky: 17 / 18 / 19 / 20
+  LittleMetacarpal: 17,
+  LittleProximal: 18,
+  LittleIntermediate: 19,
+  LittleDistal: 20,
+};
+
+const RIGGED_HAND_ASSETS = {
+  Left: 'assets/hand/LeftHandAndroidXRVisual.glb',
+  Right: 'assets/hand/RightHandAndroidXRVisual.glb',
+};
+const riggedHands = new Map(); // handedness -> { root, boneByLandmark[], visible }
+
+function _resolveBoneByLandmark(root, prefix) {
+  const map = new Array(21).fill(null);
+  const boneNames = Object.keys(RIGGED_BONE_TO_LANDMARK);
+  root.traverse((obj) => {
+    if (!obj.isBone) return;
+    for (const suffix of boneNames) {
+      // Match exact name "L_RingProximal" / "R_RingProximal".
+      // WeightFix bones are skipped — we only drive the primary chain.
+      if (obj.name === `${prefix}_${suffix}`) {
+        map[RIGGED_BONE_TO_LANDMARK[suffix]] = obj;
+        return;
+      }
+    }
+  });
+  return map;
+}
+
+function _initializeRiggedHand(handedness, assetPath) {
+  const prefix = handedness === 'Right' ? 'R' : 'L';
+  gltfLoader.load(
+    assetPath,
+    (gltf) => {
+      const root = gltf.scene;
+      const boneByLandmark = _resolveBoneByLandmark(root, prefix);
+      const resolved = boneByLandmark.filter(Boolean).length;
+      if (resolved < 15) {
+        log(`[RiggedHand] ${handedness}: only resolved ${resolved}/21 bones — names may not match`);
+      }
+
+      // Wireframe debug material for every skinned mesh in the hand. We
+      // wrap each material so the rigged hand stays visible and obviously
+      // distinct from the real GLB shading, but doesn't write color or
+      // depth (won't fight the existing renderer state).
+      root.traverse((obj) => {
+        if (obj.isMesh || obj.isSkinnedMesh) {
+          obj.material = new THREE.MeshBasicMaterial({
+            color: 0x00ff88,
+            wireframe: true,
+            transparent: true,
+            opacity: 0.55,
+            depthWrite: false,
+            depthTest: false,
+          });
+          obj.renderOrder = 9999; // draw on top so debug is always visible
+        }
+      });
+
+      root.visible = false; // hidden until "Show Rigged Hand" is toggled
+      scene.add(root);
+
+      // Capture the authored palm-span (distance between index MCP and
+      // little MCP bones at bind pose). Used as the denominator for
+      // group-level scaling: liveSpan / authoredSpan = scale factor.
+      let authoredPalmSpan = 1;
+      const indexMcp = boneByLandmark[5];
+      const pinkyMcp = boneByLandmark[17];
+      if (indexMcp && pinkyMcp) {
+        indexMcp.updateWorldMatrix(true, false);
+        pinkyMcp.updateWorldMatrix(true, false);
+        const wA = new THREE.Vector3();
+        const wB = new THREE.Vector3();
+        indexMcp.getWorldPosition(wA);
+        pinkyMcp.getWorldPosition(wB);
+        authoredPalmSpan = wA.distanceTo(wB) || 1;
+      }
+
+      riggedHands.set(handedness, { root, boneByLandmark, prefix, resolved, authoredPalmSpan });
+      // Expose to window so DevTools can inspect even though `riggedHands`
+      // is module-scoped. Also lets us write one-line `__rigDiag()` tests.
+      window.riggedHands = riggedHands;
+      log(`[RiggedHand] ${handedness} initialized (${resolved}/21 bones, authoredPalmSpan=${authoredPalmSpan.toFixed(4)})`);
+    },
+    undefined,
+    (err) => {
+      log(`[RiggedHand] Failed to load ${handedness}: ${err?.message || err}`);
+    }
+  );
+}
+// NOTE: actual loader invocation is deferred to AFTER `gltfLoader` is
+// declared (a few lines below). The function is hoisted as a `function`
+// declaration, but it captures `gltfLoader` lexically — so we have to
+// run the loop from a position where the binding exists.
+
+const _cbShowRiggedHand = document.getElementById('showRiggedHand');
+
+// Reusable scratch — never per-frame allocate.
+const _riggedTmpV = new THREE.Vector3();
+const _riggedTmpV2 = new THREE.Vector3();
+const _riggedTmpV3 = new THREE.Vector3();
+const _riggedTmpQ = new THREE.Quaternion();
+const _riggedTmpM = new THREE.Matrix4();
+const _riggedAxisX = new THREE.Vector3();
+const _riggedAxisY = new THREE.Vector3();
+const _riggedAxisZ = new THREE.Vector3();
+
+// Bone-to-bone "child landmark" map. Used in the per-bone local-rotation
+// step: each bone aims its bind-axis at its child landmark.
+const RIGGED_BONE_CHILD = {
+  Wrist: 9,                  // wrist points at middle MCP (best palm reference)
+  ThumbMetacarpal: 2,
+  ThumbProximal: 3,
+  ThumbDistal: 4,
+  IndexMetacarpal: 6,
+  IndexProximal: 7,
+  IndexIntermediate: 8,
+  MiddleMetacarpal: 10,
+  MiddleProximal: 11,
+  MiddleIntermediate: 12,
+  RingMetacarpal: 14,
+  RingProximal: 15,
+  RingIntermediate: 16,
+  LittleMetacarpal: 18,
+  LittleProximal: 19,
+  LittleIntermediate: 20,
+};
+
+function _hideAllRiggedHands(except = null) {
+  for (const entry of riggedHands.values()) {
+    if (entry !== except) entry.root.visible = false;
+  }
+}
+
+// Capture each bone's bind-pose local-axis-toward-child ONCE per asset.
+// Stored on the entry as `bindAimAxis: Map<bone, Vector3>`. We then drive
+// each bone by rotating that axis to point at the child landmark in the
+// bone's parent-local frame — this is the standard puppeteering approach
+// and respects the inverseBindMatrix.
+function _ensureBindAimCache(entry) {
+  if (entry.bindAimAxis) return;
+  entry.bindAimAxis = new Map();
+  // Build a quick name→bone lookup for child resolution.
+  const byName = new Map();
+  entry.root.traverse((o) => { if (o.isBone) byName.set(o.name, o); });
+  const prefix = entry.prefix;
+  // For each bone we drive, compute the local-space direction from this
+  // bone's bind position to its child bone's bind position, expressed in
+  // THIS bone's local frame.
+  for (const [suffix, childIdx] of Object.entries(RIGGED_BONE_CHILD)) {
+    const bone = byName.get(`${prefix}_${suffix}`);
+    if (!bone) continue;
+    // Find bind-time child bone by suffix lookup using the kinematic chain.
+    const childSuffix = _suffixForLandmark(childIdx);
+    if (!childSuffix) continue;
+    const child = byName.get(`${prefix}_${childSuffix}`);
+    if (!child) continue;
+    // Make sure world matrices reflect the bind pose.
+    bone.updateWorldMatrix(true, false);
+    child.updateWorldMatrix(true, false);
+    // Direction in WORLD space.
+    const childWorld = new THREE.Vector3();
+    const boneWorld = new THREE.Vector3();
+    child.getWorldPosition(childWorld);
+    bone.getWorldPosition(boneWorld);
+    childWorld.sub(boneWorld).normalize();
+    // Convert to the BONE's local space (so we can rotate it later).
+    const inv = new THREE.Matrix4().copy(bone.matrixWorld).invert();
+    // We only want the rotation part, not translation, so use a transformDirection.
+    childWorld.transformDirection(inv);
+    childWorld.normalize();
+    entry.bindAimAxis.set(bone, childWorld);
+    // Also stash the original quaternion so we can compose deltas.
+    entry.bindQuat = entry.bindQuat || new Map();
+    entry.bindQuat.set(bone, bone.quaternion.clone());
+  }
+}
+
+// Reverse lookup: given a landmark index, get the bone-name suffix.
+function _suffixForLandmark(idx) {
+  for (const [suffix, mappedIdx] of Object.entries(RIGGED_BONE_TO_LANDMARK)) {
+    if (mappedIdx === idx) return suffix;
+  }
+  return null;
+}
+
+// Compute the rigged group's WORLD pose from the live landmarks: anchor it
+// at the wrist, scale it by palm-span vs. authored palm-span, and orient it
+// so the palm-normal matches the live palm.
+function _computeRiggedGroupPose(landmarks, entry, outPos, outQuat, outScale) {
+  // Live palm reference points: wrist (0), index MCP (5), pinky MCP (17).
+  mapToOrthographicSpaceInto(_riggedTmpV, landmarks[0]);   // wrist
+  mapToOrthographicSpaceInto(_riggedTmpV2, landmarks[5]);  // index MCP
+  mapToOrthographicSpaceInto(_riggedTmpV3, landmarks[17]); // pinky MCP
+
+  // Position: wrist.
+  outPos.copy(_riggedTmpV);
+
+  // Build palm basis from these three points:
+  //   palmAcross = (pinkyMCP - indexMCP).normalize()
+  //   palmAlong  = ((indexMCP+pinkyMCP)*0.5 - wrist).normalize()
+  //   palmNormal = palmAlong × palmAcross
+  _riggedAxisX.subVectors(_riggedTmpV3, _riggedTmpV2).normalize(); // across
+  _riggedAxisY.copy(_riggedTmpV2).add(_riggedTmpV3).multiplyScalar(0.5).sub(_riggedTmpV).normalize(); // along
+  _riggedAxisZ.crossVectors(_riggedAxisY, _riggedAxisX).normalize(); // normal
+  // Re-orthogonalize across so the basis is clean.
+  _riggedAxisX.crossVectors(_riggedAxisZ, _riggedAxisY).normalize();
+
+  // Scale: live palm-span vs. asset's authored palm-span (use bbox.x as a
+  // reasonable proxy; we cached it on entry at load time).
+  const livePalmSpan = _riggedTmpV3.distanceTo(_riggedTmpV2);
+  const authoredPalmSpan = entry.authoredPalmSpan || 1;
+  const s = livePalmSpan / authoredPalmSpan;
+  outScale.set(s, s, s);
+
+  // Rotation: rotation matrix from authored basis (which we treat as
+  // identity — the rigged hand was authored with +X right, +Y up, +Z out)
+  // to the live basis. The asset authored axes happen to map: model Y →
+  // along finger direction (palm-along), model X → across, model Z → normal.
+  _riggedTmpM.makeBasis(_riggedAxisX, _riggedAxisY, _riggedAxisZ);
+  outQuat.setFromRotationMatrix(_riggedTmpM);
+}
+
+// Drive the rigged hand from MediaPipe landmarks. Pure debug feedback.
+//
+// Path B: this driver is intentionally dormant. The infrastructure (asset
+// load, bone resolution, HUD readout) stays in tree so we can resume
+// Strategy 2 later, but the per-frame update is a no-op unless the explicit
+// `window.__enableRiggedHand` flag is set in DevTools. This keeps the
+// existing landmark-driven ring placement as the sole source of truth and
+// lets us focus tuning on the existing system without rigged-hand work
+// interfering.
+function updateRiggedHand(results) {
+  if (!window.__enableRiggedHand) {
+    _hideAllRiggedHands();
+    return;
+  }
+  if (!_cbShowRiggedHand || !_cbShowRiggedHand.checked) {
+    _hideAllRiggedHands();
+    return;
+  }
+  if (!results?.landmarks || results.landmarks.length === 0) {
+    _hideAllRiggedHands();
+    return;
+  }
+  const handedness = getReportedHandedness(results);
+  const entry = riggedHands.get(handedness);
+  if (!entry) return;
+  _hideAllRiggedHands(entry);
+
+  const landmarks = results.landmarks[0];
+  const { root, boneByLandmark } = entry;
+  _ensureBindAimCache(entry);
+  root.visible = true;
+
+  // ---- Stage A: place the whole rigged group at the live hand pose. ----
+  // Group-level transform handles wrist position, palm orientation, and
+  // global scale. The skinning shader keeps using the bind matrix correctly
+  // because we never touched bone.position.
+  _computeRiggedGroupPose(landmarks, entry, _riggedTmpV, _riggedTmpQ, _riggedAxisX);
+  root.position.copy(_riggedTmpV);
+  root.quaternion.copy(_riggedTmpQ);
+  root.scale.copy(_riggedAxisX); // outScale was reused into _riggedAxisX
+
+  // ---- Stage B: rotate finger bones to match landmark angles. ----
+  // For each driven bone we have its bind-pose aim axis (local frame).
+  // We compute the desired aim axis from the landmark direction
+  // (parent→child) expressed in this bone's parent-local frame, then
+  // build a delta rotation that maps bind→desired and prepend it to the
+  // bind-pose quaternion.
+  for (const [suffix, childLandmarkIdx] of Object.entries(RIGGED_BONE_CHILD)) {
+    const boneLandmarkIdx = RIGGED_BONE_TO_LANDMARK[suffix];
+    const bone = boneByLandmark[boneLandmarkIdx];
+    if (!bone) continue;
+    const bindAim = entry.bindAimAxis.get(bone);
+    const bindQuat = entry.bindQuat.get(bone);
+    if (!bindAim || !bindQuat) continue;
+
+    // Live direction in WORLD scene space.
+    mapToOrthographicSpaceInto(_riggedTmpV, landmarks[boneLandmarkIdx]);
+    mapToOrthographicSpaceInto(_riggedTmpV2, landmarks[childLandmarkIdx]);
+    _riggedTmpV2.sub(_riggedTmpV).normalize();
+
+    // Convert to bone's parent-local space so we can apply via local rot.
+    const parent = bone.parent;
+    if (parent) {
+      parent.updateWorldMatrix(true, false);
+      _riggedTmpM.copy(parent.matrixWorld).invert();
+      _riggedTmpV2.transformDirection(_riggedTmpM);
+      _riggedTmpV2.normalize();
+    }
+
+    // Apply bindQuat to bindAim to get bindAim in parent-local space.
+    _riggedTmpV3.copy(bindAim).applyQuaternion(bindQuat);
+
+    // Build delta quaternion that maps current bindAim direction → live.
+    _riggedTmpQ.setFromUnitVectors(_riggedTmpV3, _riggedTmpV2);
+
+    // Final bone rotation = delta * bindQuat (apply delta in parent space).
+    bone.quaternion.copy(_riggedTmpQ).multiply(bindQuat);
+  }
+
+  root.updateMatrixWorld(true);
+}
+
+// One-liner diagnostic: paste `__rigDiag()` into DevTools console (after
+// typing 'allow pasting' once per session). Returns the load/visibility/
+// bbox state for whichever rigged hand is in scene.
+window.__rigDiag = function () {
+  const all = {};
+  for (const [hd, entry] of riggedHands.entries()) {
+    const bbox = new THREE.Box3().setFromObject(entry.root);
+    const size = new THREE.Vector3();
+    bbox.getSize(size);
+    const meshes = [];
+    entry.root.traverse((o) => {
+      if (o.isSkinnedMesh) meshes.push({ name: o.name, visible: o.visible, frustumCulled: o.frustumCulled });
+    });
+    all[hd] = {
+      prefix: entry.prefix,
+      resolvedBones: entry.resolved,
+      rootVisible: entry.root.visible,
+      inScene: !!entry.root.parent,
+      bbox_size: size.toArray().map((n) => +n.toFixed(4)),
+      bbox_min: bbox.min.toArray().map((n) => +n.toFixed(4)),
+      bbox_max: bbox.max.toArray().map((n) => +n.toFixed(4)),
+      meshes,
+    };
+  }
+  console.table(all);
+  return all;
+};
 
 // --- Load GLTF Model ---
 let ringModel = null;
 const gltfLoader = new THREE.GLTFLoader();
 
+// PR-α deferred initialization: now that gltfLoader exists, kick off the
+// rigged-hand asset loads. Function was declared earlier; only the
+// invocation is deferred to here so the lexical `gltfLoader` capture is valid.
+for (const [hd, path] of Object.entries(RIGGED_HAND_ASSETS)) _initializeRiggedHand(hd, path);
+
+// --- Mask.glb diagnostic loader (Strategy 2 prep) --------------------------
+// One-shot: load assets/Mask.glb, print its structure, then drop the
+// reference. NOT added to the scene. Tells us whether the asset is a finger
+// sleeve, a multi-segment finger, or a whole hand so we can pick the right
+// rigging strategy. Output is grouped under [Mask.glb] in the console — open
+// DevTools and copy the block back into chat.
+gltfLoader.load(
+  'assets/Mask.glb',
+  (gltf) => {
+    const root = gltf.scene;
+    const bbox = new THREE.Box3().setFromObject(root);
+    const size = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    bbox.getSize(size);
+    bbox.getCenter(center);
+
+    const nodes = [];
+    const meshes = [];
+    const materials = new Set();
+    let totalVerts = 0;
+    let totalTris = 0;
+
+    root.traverse((obj) => {
+      const indent = '  '.repeat(_depthOf(obj, root));
+      const tag = obj.isMesh ? 'Mesh' : (obj.isBone ? 'Bone' : (obj.isSkinnedMesh ? 'SkinnedMesh' : (obj.type || 'Object3D')));
+      nodes.push(`${indent}${tag}: ${obj.name || '(unnamed)'}`);
+      if (obj.isMesh || obj.isSkinnedMesh) {
+        const geom = obj.geometry;
+        const v = geom?.attributes?.position?.count || 0;
+        const i = geom?.index?.count || 0;
+        const tris = i ? i / 3 : v / 3;
+        totalVerts += v;
+        totalTris += tris;
+        meshes.push({
+          name: obj.name || '(unnamed)',
+          verts: v,
+          tris,
+          skinned: !!obj.isSkinnedMesh,
+          material: obj.material?.name || obj.material?.type || '?',
+        });
+        if (obj.material) materials.add(obj.material?.name || obj.material?.type);
+      }
+    });
+
+    console.groupCollapsed('%c[Mask.glb] structure report', 'color:#7fffd4;font-weight:bold');
+    console.log('Bounding box (local units):');
+    console.log('  size  :', size.x.toFixed(4), size.y.toFixed(4), size.z.toFixed(4));
+    console.log('  center:', center.x.toFixed(4), center.y.toFixed(4), center.z.toFixed(4));
+    console.log('  min   :', bbox.min.x.toFixed(4), bbox.min.y.toFixed(4), bbox.min.z.toFixed(4));
+    console.log('  max   :', bbox.max.x.toFixed(4), bbox.max.y.toFixed(4), bbox.max.z.toFixed(4));
+    const longest = Math.max(size.x, size.y, size.z);
+    const shortest = Math.min(size.x, size.y, size.z);
+    const ratio = shortest > 1e-6 ? longest / shortest : 0;
+    console.log(`  long/short ratio: ${ratio.toFixed(2)}  (>5 = sleeve, ~2-3 = finger, <2 = palm/hand)`);
+    console.log('');
+    console.log('Mesh summary:');
+    console.log('  meshes      :', meshes.length);
+    console.log('  total verts :', totalVerts);
+    console.log('  total tris  :', totalTris);
+    console.log('  materials   :', Array.from(materials).join(', ') || '(none)');
+    console.log('  skinned?    :', meshes.some((m) => m.skinned) ? 'yes' : 'no');
+    console.log('');
+    console.log('Per-mesh:');
+    meshes.forEach((m) => console.log(`  - ${m.name}: ${m.verts} v / ${m.tris} t  [${m.material}]${m.skinned ? '  (skinned)' : ''}`));
+    console.log('');
+    console.log('Node hierarchy:');
+    nodes.forEach((n) => console.log(n));
+    console.log('');
+    console.log('Animations:', gltf.animations?.length || 0);
+    console.log('Skins      :', gltf.parser?.json?.skins?.length || 0);
+    console.log('');
+    console.log('VERDICT (heuristic): ' +
+      (ratio > 5 ? 'looks like a FINGER SLEEVE (single segment cylinder/tube)'
+        : ratio > 2.5 ? 'looks like a FINGER or finger group'
+          : 'looks like a HAND or palm region'));
+    console.groupEnd();
+
+    // Stash on window so the next session can also inspect interactively.
+    window.__maskGlbReport = { size, center, bbox, meshes, ratio, nodes, gltf };
+  },
+  undefined,
+  (err) => {
+    console.warn('[Mask.glb] failed to load:', err?.message || err);
+  }
+);
+function _depthOf(obj, root) {
+  let d = 0;
+  let cur = obj;
+  while (cur && cur !== root) { d++; cur = cur.parent; }
+  return d;
+}
+
+// --- Hand GLB diagnostic loader (Strategy 2 viability check) --------------
+// Inspects the existing rigged hand assets at assets/hand/ to see whether
+// they expose bones we can drive directly from MediaPipe landmarks. Reports
+// bone count + names, mesh count, skinning state, and bbox proportions.
+// One-shot, console-only, no scene changes.
+function _diagnoseHandGlb(path) {
+  gltfLoader.load(
+    path,
+    (gltf) => {
+      const root = gltf.scene;
+      const bbox = new THREE.Box3().setFromObject(root);
+      const size = new THREE.Vector3();
+      const center = new THREE.Vector3();
+      bbox.getSize(size);
+      bbox.getCenter(center);
+
+      const bones = [];
+      const meshes = [];
+      const skinnedMeshes = [];
+      const materials = new Set();
+      let totalVerts = 0;
+      let totalTris = 0;
+
+      root.traverse((obj) => {
+        if (obj.isBone) {
+          bones.push({
+            name: obj.name || '(unnamed)',
+            depth: _depthOf(obj, root),
+            parent: obj.parent?.name || '(none)',
+          });
+        }
+        if (obj.isMesh || obj.isSkinnedMesh) {
+          const geom = obj.geometry;
+          const v = geom?.attributes?.position?.count || 0;
+          const i = geom?.index?.count || 0;
+          const tris = i ? i / 3 : v / 3;
+          totalVerts += v;
+          totalTris += tris;
+          const entry = {
+            name: obj.name || '(unnamed)',
+            verts: v,
+            tris,
+            skinned: !!obj.isSkinnedMesh,
+            material: obj.material?.name || obj.material?.type || '?',
+          };
+          meshes.push(entry);
+          if (obj.isSkinnedMesh) skinnedMeshes.push(entry);
+          if (obj.material) materials.add(obj.material?.name || obj.material?.type);
+        }
+      });
+
+      const tag = path.split('/').pop();
+      console.groupCollapsed(`%c[${tag}] hand structure report`, 'color:#ffd47f;font-weight:bold');
+      console.log('Bounding box (local units):');
+      console.log('  size  :', size.x.toFixed(4), size.y.toFixed(4), size.z.toFixed(4));
+      console.log('  center:', center.x.toFixed(4), center.y.toFixed(4), center.z.toFixed(4));
+      console.log('');
+      console.log('Mesh summary:');
+      console.log('  meshes        :', meshes.length);
+      console.log('  skinned meshes:', skinnedMeshes.length);
+      console.log('  total verts   :', totalVerts);
+      console.log('  total tris    :', totalTris);
+      console.log('  materials     :', Array.from(materials).join(', ') || '(none)');
+      console.log('');
+      console.log('Bones / skeleton:');
+      console.log('  bone count    :', bones.length);
+      console.log('  skins (parser):', gltf.parser?.json?.skins?.length || 0);
+      if (bones.length) {
+        console.log('  bone list (name -> parent):');
+        bones.forEach((b) => console.log(`    [${b.depth}] ${b.name}  <- ${b.parent}`));
+      } else {
+        console.log('  (no bones detected — mesh is static)');
+      }
+      console.log('');
+      console.log('Animations:', gltf.animations?.length || 0);
+      console.log('');
+      const verdict = bones.length >= 15
+        ? 'RIGGED: enough bones to drive from MediaPipe (Strategy 2 viable)'
+        : bones.length > 0
+          ? 'PARTIALLY RIGGED: some bones, may need careful mapping'
+          : 'STATIC: no bones — would need procedural deform, same as current handOccluder.js';
+      console.log('VERDICT:', verdict);
+      console.groupEnd();
+
+      window.__handGlbReports = window.__handGlbReports || {};
+      window.__handGlbReports[tag] = { size, center, bbox, meshes, bones, skinnedMeshes, gltf };
+    },
+    undefined,
+    (err) => {
+      console.warn(`[${path}] failed to load:`, err?.message || err);
+    }
+  );
+}
+_diagnoseHandGlb('assets/hand/LeftHandAndroidXRVisual.glb');
+_diagnoseHandGlb('assets/hand/RightHandAndroidXRVisual.glb');
+
 // Available ring models. Each `preset` captures the slider values that make
 // the model sit correctly on the finger — applied on load/swap so the user
 // doesn't have to re-tune rotX/rotY/rotZ/scale for every ring.
 const RING_MODELS = [
-  { id: 'ring', label: 'Default Ring', path: 'assets/ring.glb', preset: { rotX: 164, rotY: 90, rotZ: -67, scale: 0.75 } },
-  { id: 'Rotation Test 01', label: 'Rotation Test 01', path: 'assets/Rotation Test 01.glb', preset: { rotX: 73, rotY: 90, rotZ: -67, scale: 0.75 } },
-  { id: 'Rotation Test 02', label: 'Rotation Test 02', path: 'assets/Rotation Test 02.glb', preset: { rotX: 73, rotY: 90, rotZ: -67, scale: 0.75 } },
-  { id: 'Rotation Test 04', label: 'Rotation Test 04', path: 'assets/Rotation Test 04.glb', preset: { rotX: 164, rotY: 90, rotZ: -67, scale: 1.0 } },
-  { id: 'Rotation Test 05', label: 'Rotation Test 05', path: 'assets/Rotation Test 05.glb', preset: { rotX: 44, rotY: 86, rotZ: 39, scale: 0.8 } },
-  { id: '01 Clean', label: '01 Clean', path: 'assets/01 Clean.glb', preset: { rotX: 101, rotY: 2, rotZ: -2, scale: 0.8 } },
+  {
+    id: 'ring',
+    label: 'Default Ring',
+    path: 'assets/ring.glb',
+    preset: { rotX: 164, rotY: 90, rotZ: -67, scale: 0.75, anchorT: 0.62, offsetX: 0, offsetY: 0, offsetZ: 0 }
+  },
+  {
+    id: 'Rotation Test 01',
+    label: 'Rotation Test 01',
+    path: 'assets/Rotation Test 01.glb',
+    preset: { rotX: 73, rotY: 90, rotZ: -67, scale: 0.75, anchorT: 0.5, offsetX: 0, offsetY: 0, offsetZ: 0 }
+  },
+  {
+    id: 'Rotation Test 02',
+    label: 'Rotation Test 02',
+    path: 'assets/Rotation Test 02.glb',
+    preset: { rotX: 73, rotY: 90, rotZ: -67, scale: 0.75, anchorT: 0.5, offsetX: 0, offsetY: 0, offsetZ: 0 }
+  },
+  {
+    id: 'Rotation Test 04',
+    label: 'Rotation Test 04',
+    path: 'assets/Rotation Test 04.glb',
+    preset: { rotX: 164, rotY: 90, rotZ: -67, scale: 1.0, anchorT: 0.5, offsetX: 0, offsetY: 0, offsetZ: 0 }
+  },
+  {
+    id: 'Rotation Test 05',
+    label: 'Rotation Test 05',
+    path: 'assets/Rotation Test 05.glb',
+    preset: { rotX: 44, rotY: 86, rotZ: 39, scale: 0.8, anchorT: 0.5, offsetX: 0, offsetY: 0, offsetZ: 0 }
+  },
+  {
+    id: '01 Clean',
+    label: '01 Clean',
+    path: 'assets/01 Clean.glb',
+    preset: { rotX: 101, rotY: 2, rotZ: -2, scale: 0.8, anchorT: 0.5, offsetX: 0, offsetY: 0, offsetZ: 0 }
+  },
 ];
 
 // Push a ring's preset into the rotation + scale UI (both range sliders and
@@ -439,6 +1072,10 @@ function applyRingPreset(preset) {
     ['rotY', 'numY', preset.rotY],
     ['rotZ', 'numZ', preset.rotZ],
     ['scaleBase', 'numScale', preset.scale],
+    ['ringAnchorT', 'numRingAnchorT', preset.anchorT ?? 0.5],
+    ['ringOffsetX', 'numRingOffsetX', preset.offsetX ?? 0],
+    ['ringOffsetY', 'numRingOffsetY', preset.offsetY ?? 0],
+    ['ringOffsetZ', 'numRingOffsetZ', preset.offsetZ ?? 0],
   ];
   for (const [rangeId, numId, value] of pairs) {
     if (value === undefined) continue;
@@ -447,6 +1084,62 @@ function applyRingPreset(preset) {
     if (range) range.value = value;
     if (num) num.value = value;
   }
+}
+
+window.captureActiveRingPreset = function captureActiveRingPreset() {
+  const entry = RING_MODELS[currentRingIndex];
+  if (!entry) return null;
+  const preset = {
+    rotX: Number(_slRotX?.value ?? entry.preset.rotX),
+    rotY: Number(_slRotY?.value ?? entry.preset.rotY),
+    rotZ: Number(_slRotZ?.value ?? entry.preset.rotZ),
+    scale: Number(_slScaleBase?.value ?? entry.preset.scale),
+    anchorT: Number(_slRingAnchorT?.value ?? entry.preset.anchorT ?? 0.5),
+    offsetX: Number(_slRingOffsetX?.value ?? entry.preset.offsetX ?? 0),
+    offsetY: Number(_slRingOffsetY?.value ?? entry.preset.offsetY ?? 0),
+    offsetZ: Number(_slRingOffsetZ?.value ?? entry.preset.offsetZ ?? 0),
+  };
+  console.log(`[RingPreset:${entry.id}]`, JSON.stringify(preset));
+  console.table(preset);
+  return preset;
+};
+
+function percentile(sortedValues, t) {
+  if (!sortedValues.length) return 0;
+  const idx = Math.min(sortedValues.length - 1, Math.max(0, (sortedValues.length - 1) * t));
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return sortedValues[lo];
+  return sortedValues[lo] + (sortedValues[hi] - sortedValues[lo]) * (idx - lo);
+}
+
+function collectModelVertices(root) {
+  const vertices = [];
+  root.updateMatrixWorld(true);
+  root.traverse((node) => {
+    if (!node.isMesh || !node.geometry?.attributes?.position) return;
+    const pos = node.geometry.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      const vertex = new THREE.Vector3().fromBufferAttribute(pos, i);
+      node.localToWorld(vertex);
+      vertices.push(vertex);
+    }
+  });
+  return vertices;
+}
+
+function getRobustVertexCenter(vertices) {
+  if (!vertices.length) return new THREE.Vector3();
+
+  const xs = vertices.map((v) => v.x).sort((a, b) => a - b);
+  const ys = vertices.map((v) => v.y).sort((a, b) => a - b);
+  const zs = vertices.map((v) => v.z).sort((a, b) => a - b);
+
+  return new THREE.Vector3(
+    (percentile(xs, 0.15) + percentile(xs, 0.85)) * 0.5,
+    (percentile(ys, 0.15) + percentile(ys, 0.85)) * 0.5,
+    (percentile(zs, 0.15) + percentile(zs, 0.85)) * 0.5
+  );
 }
 
 let currentRingIndex = 3; // Start with Rotation Test 04 (after removing Rotation Test 03)
@@ -475,6 +1168,7 @@ function deactivateHandTracking() {
   isHandPresent = false;
   if (ringModel) ringModel.visible = false;
   if (typeof occluderMesh !== 'undefined' && occluderMesh) occluderMesh.visible = false;
+  hideHandOccluders();
   if (typeof hideBlockerOccluders === 'function') hideBlockerOccluders();
   // Clear any stale hand-landmark overlay so the canvas doesn't keep the
   // last drawn skeleton while tracking is paused.
@@ -515,17 +1209,7 @@ function buildRingGroup(modelPath, rawModel) {
 
   // Step 4: Auto-align ring hole to Y-axis using ring-shape detection
   rawModel.updateMatrixWorld(true);
-  const vertices = [];
-  rawModel.traverse(node => {
-    if (node.isMesh && node.geometry && node.geometry.attributes.position) {
-      const pos = node.geometry.attributes.position;
-      for (let i = 0; i < pos.count; i++) {
-        const v = new THREE.Vector3().fromBufferAttribute(pos, i);
-        node.localToWorld(v);
-        vertices.push(v);
-      }
-    }
-  });
+  const vertices = collectModelVertices(rawModel);
 
   if (vertices.length > 0) {
     const centroid = new THREE.Vector3();
@@ -759,6 +1443,26 @@ if (showRingAxesToggle) {
       ringModel.userData.axesHelper.visible = showRingAxesToggle.checked;
     }
   });
+}
+
+const showHandMeshToggle = document.getElementById('showHandMesh');
+const toggleHandMeshBtn = document.getElementById('toggleHandMeshBtn');
+
+function syncHandMeshButtonState() {
+  if (!toggleHandMeshBtn || !showHandMeshToggle) return;
+  const enabled = !!showHandMeshToggle.checked;
+  toggleHandMeshBtn.classList.toggle('active', enabled);
+  toggleHandMeshBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+  toggleHandMeshBtn.textContent = enabled ? 'Skin Mesh On' : 'Skin Mesh Off';
+}
+
+if (showHandMeshToggle && toggleHandMeshBtn) {
+  toggleHandMeshBtn.addEventListener('click', () => {
+    showHandMeshToggle.checked = !showHandMeshToggle.checked;
+    syncHandMeshButtonState();
+  });
+  showHandMeshToggle.addEventListener('change', syncHandMeshButtonState);
+  syncHandMeshButtonState();
 }
 
 const showEarringToggle = document.getElementById('showEarring');
@@ -1224,6 +1928,7 @@ const _tmpDirD = new THREE.Vector3();
 const _tmpDirK = new THREE.Vector3();
 const _tmpDirN = new THREE.Vector3();
 const _tmpDirX = new THREE.Vector3();
+const _tmpDirSurface = new THREE.Vector3();
 const _tmpMat4 = new THREE.Matrix4();
 const _tmpEuler = new THREE.Euler();
 const _tmpQuatA = new THREE.Quaternion();
@@ -1239,6 +1944,10 @@ const _slRotY = document.getElementById('rotY');
 const _slRotZ = document.getElementById('rotZ');
 const _slScaleBase = document.getElementById('scaleBase');
 const _slOccluderScale = document.getElementById('occluderScale');
+const _slRingAnchorT = document.getElementById('ringAnchorT');
+const _slRingOffsetX = document.getElementById('ringOffsetX');
+const _slRingOffsetY = document.getElementById('ringOffsetY');
+const _slRingOffsetZ = document.getElementById('ringOffsetZ');
 const _cbShowHandMesh = document.getElementById('showHandMesh');
 const _poseHintEl = document.getElementById('pose-hint');
 
@@ -1265,10 +1974,132 @@ const POSE_SPREAD_HIDE = 1.60;  // palm-span/middle-finger — fingers fanned ou
 const POSE_SPREAD_SHOW = 1.40;  // back to relaxed hand — show ring again
 let _ringPoseAcceptable = true;
 
+// FIX D: hysteresis state for the occlusion-hide guards (world-length ratio
+// + neighbor-finger forward check). Without hysteresis a single noisy frame
+// flips visibility, producing visible flicker. Need K consecutive bad frames
+// to hide, M consecutive good frames to show again.
+let _hideBadStreak = 0;
+let _hideGoodStreak = 0;
+let _hideActive = false;
+const HIDE_REQUIRES_BAD_FRAMES = 2;   // borderline single-frame noise won't hide
+const HIDE_RELEASES_GOOD_FRAMES = 4;  // need a clear streak to bring ring back
+let _dbgHideThisFrame = false;
+let _dbgForwardCount = 0;
+let _dbgFingerRatio = 0;
+
+// scaleBoost: per-pose calibration multiplier. Tuned conservatively from
+// HUD-evidence screenshots (#42–#48):
+//   - back/side-on poses already render correctly at 1.00
+//   - 'front' (palm or back to camera) was slightly small on flat poses with
+//     palmFacing > 0.95 → +10% lifts those without breaking other fronts
+//   - 'side' and 'foreshortened' get small boosts because the foreshorten
+//     compensation in the occluder block doesn't propagate to ring scale
+//   - 'fist' stays at 1.00 because curled fingers project very short and
+//     any boost compounds the existing radius->scale path into oversize
+// All values are conservative; tweak by ±0.05 increments if a specific
+// pose shows a visible mismatch in side-by-side testing.
+// VTO PARITY PASS: side-by-side with ijewel showed our ring floating ABOVE
+// the finger and slightly under-sized on back/knuckle poses. Two changes:
+//   1) surfaceLift slashed across all poses. The previous values pushed the
+//      ring center 34-55% of a finger-radius FORWARD of the visible 2D
+//      midpoint — which is already on the finger surface from the camera's
+//      POV. Result: ring hovered above skin instead of wrapping. New values
+//      keep a small forward bias (so the ring sits "on top of" the finger
+//      rather than embedded in it) without floating.
+//   2) scaleBoost raised on back and fist where ijewel's render reads as
+//      "sized to the knuckle" while ours read as "smaller than the finger".
+const RING_POSE_FIT = {
+  front: { anchorBias: -0.10, axisX: 0.00, axisY: 0.22, surfaceLift: 0.12, scaleRadiusBlend: 0.12, screenBlend: 0.06, scaleBoost: 1.10 },
+  back: { anchorBias: -0.08, axisX: 0.00, axisY: 0.20, surfaceLift: 0.10, scaleRadiusBlend: 0.10, screenBlend: 0.06, scaleBoost: 1.10 },
+  side: { anchorBias: -0.04, axisX: 0.02, axisY: 0.18, surfaceLift: 0.20, scaleRadiusBlend: 0.18, screenBlend: 0.16, scaleBoost: 1.05 },
+  foreshortened: { anchorBias: -0.14, axisX: 0.00, axisY: 0.24, surfaceLift: 0.22, scaleRadiusBlend: 0.22, screenBlend: 0.18, scaleBoost: 1.05 },
+  fist: { anchorBias: -0.16, axisX: 0.00, axisY: 0.26, surfaceLift: 0.18, scaleRadiusBlend: 0.18, screenBlend: 0.12, scaleBoost: 1.10 }
+};
+
 function _setPoseHintVisible(show) {
   if (!_poseHintEl) return;
   if (show) _poseHintEl.classList.add('visible');
   else _poseHintEl.classList.remove('visible');
+}
+
+// --- Pose diagnostic HUD ---------------------------------------------------
+// Pure read-only telemetry for debugging why a given pose was classified the
+// way it was. Toggled by the #showPoseDebug checkbox in index.html. Does NOT
+// touch any tracking state; only formats and prints values that the
+// classifier already produced. Throttled to ~10fps so it doesn't bog the
+// layout in the hot render loop.
+const _poseDebugHudEl = document.getElementById('poseDebugHud');
+const _poseDebugCheckbox = document.getElementById('showPoseDebug');
+let _poseDebugLastWriteMs = 0;
+function _fmt(n, d = 3) {
+  if (typeof n !== 'number' || !isFinite(n)) return ' --- ';
+  return (n >= 0 ? ' ' : '') + n.toFixed(d);
+}
+function updatePoseDebugHud(poseFit, basisNormal, fingerDir, isReportedRightHand, reportedHandedness, fingerZMag, spreadRatio, activeFinger) {
+  if (!_poseDebugHudEl || !_poseDebugCheckbox) return;
+  if (!_poseDebugCheckbox.checked) {
+    if (_poseDebugHudEl.style.display !== 'none') _poseDebugHudEl.style.display = 'none';
+    return;
+  }
+  const nowMs = performance.now();
+  if (nowMs - _poseDebugLastWriteMs < 100) return;
+  _poseDebugLastWriteMs = nowMs;
+  if (_poseDebugHudEl.style.display !== 'block') _poseDebugHudEl.style.display = 'block';
+
+  // basisNormal points along the palm/back axis; basisNormal.z > 0 means the
+  // palm faces the camera, < 0 means the back of the hand faces the camera.
+  const palmFacingCamera = basisNormal.z > 0;
+  const palmFacingMag = Math.abs(basisNormal.z);
+  const fit = poseFit.fit || {};
+
+  _poseDebugHudEl.textContent =
+`POSE  : ${poseFit.name || '?'}  ${palmFacingCamera ? '(palm)' : '(back)'}
+FINGER: ${activeFinger?.id ?? '?'}    HAND : ${reportedHandedness} (${isReportedRightHand ? 'R' : 'L'})
+
+basisNormal  X:${_fmt(basisNormal.x)} Y:${_fmt(basisNormal.y)} Z:${_fmt(basisNormal.z)}
+fingerDir    X:${_fmt(fingerDir.x)} Y:${_fmt(fingerDir.y)} Z:${_fmt(fingerDir.z)}
+
+palmFacing   : ${_fmt(palmFacingMag)}
+fingerZMag   : ${_fmt(fingerZMag)}
+spreadRatio  : ${_fmt(spreadRatio, 2)}
+sideAmount   : ${_fmt(poseFit.sideAmount, 2)}
+fingerToward : ${_fmt(poseFit.fingerTowardCamera, 2)}
+spreadAmount : ${_fmt(poseFit.spreadAmount, 2)}
+curledAmount : ${_fmt(poseFit.curledAmount, 2)}
+
+HIDE STATE   : ${_hideActive ? '*** HIDDEN ***' : 'visible'}  frame=${_dbgHideThisFrame ? 'Y' : 'N'}
+  fwdCount   : ${_dbgForwardCount}  (>=2 hides)
+  fingerRatio: ${_fmt(_dbgFingerRatio, 2)}  (need 0.45-1.80)
+  badStreak  : ${_hideBadStreak} / ${HIDE_REQUIRES_BAD_FRAMES}
+  goodStreak : ${_hideGoodStreak} / ${HIDE_RELEASES_GOOD_FRAMES}
+
+FIT PROFILE  : ${poseFit.name}
+  anchorBias : ${_fmt(fit.anchorBias, 2)}
+  axisX      : ${_fmt(fit.axisX, 2)}
+  axisY      : ${_fmt(fit.axisY, 2)}
+  surfaceLift: ${_fmt(fit.surfaceLift, 2)}
+  scaleBoost : ${_fmt(fit.scaleBoost, 2)}
+
+${_riggedHandStatusLines(reportedHandedness)}`;
+}
+
+// Returns a multi-line string describing the rigged-hand load + visibility
+// state for the active handedness. Lets the on-screen HUD answer the same
+// question __rigDiag() answers in DevTools, without a paste step.
+function _riggedHandStatusLines(reportedHandedness) {
+  if (!riggedHands || riggedHands.size === 0) {
+    return 'RIGGED HAND   : (not loaded yet)';
+  }
+  const entry = riggedHands.get(reportedHandedness);
+  if (!entry) {
+    return `RIGGED HAND   : (no asset for ${reportedHandedness})`;
+  }
+  const bbox = new THREE.Box3().setFromObject(entry.root);
+  const size = new THREE.Vector3();
+  bbox.getSize(size);
+  return `RIGGED HAND   : ${entry.prefix}  bones=${entry.resolved}/21  vis=${entry.root.visible ? 'yes' : 'NO'}
+  bbox size  : ${_fmt(size.x)} ${_fmt(size.y)} ${_fmt(size.z)}
+  bbox center: ${_fmt((bbox.min.x + bbox.max.x) * 0.5)} ${_fmt((bbox.min.y + bbox.max.y) * 0.5)} ${_fmt((bbox.min.z + bbox.max.z) * 0.5)}`;
 }
 
 // ORTHOGRAPHIC POSITIONING: Zero Drift Mapping
@@ -1468,6 +2299,67 @@ function getSegmentDepth(worldLandmarks, startIdx, endIdx) {
   return ((-worldLandmarks[startIdx].z) + (-worldLandmarks[endIdx].z)) / 2;
 }
 
+function clamp01(value) {
+  return Math.min(1, Math.max(0, value));
+}
+
+function smoothstep(edge0, edge1, value) {
+  const t = clamp01((value - edge0) / (edge1 - edge0 || 1));
+  return t * t * (3 - 2 * t);
+}
+
+function mix(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function getSegmentSceneDirectionInto(out, landmarks, startIdx, endIdx) {
+  mapToOrthographicSpaceInto(_tmpPosA, landmarks[endIdx]);
+  mapToOrthographicSpaceInto(_tmpPosB, landmarks[startIdx]);
+  return out.subVectors(_tmpPosA, _tmpPosB).normalize();
+}
+
+function estimateFingerRadiusScene(landmarks, anchorStart, anchorEnd, segmentLengthScene) {
+  mapToOrthographicSpaceInto(_tmpPosA, landmarks[5]);
+  mapToOrthographicSpaceInto(_tmpPosB, landmarks[17]);
+  const palmSpanScene = _tmpPosA.distanceTo(_tmpPosB);
+  const fromSegment = segmentLengthScene * 0.23;
+  const fromPalm = palmSpanScene * 0.055;
+  return Math.max(segmentLengthScene * 0.16, Math.min(segmentLengthScene * 0.34, Math.max(fromSegment, fromPalm)));
+}
+
+function classifyRingPose(landmarks, worldLandmarks, basisNormal, fingerDir, spreadRatio, isReportedRightHand) {
+  const palmFacing = Math.abs(basisNormal.z);
+  const sideAmount = 1 - smoothstep(0.28, 0.72, palmFacing);
+  const fingerTowardCamera = smoothstep(0.48, 0.86, Math.abs(fingerDir.z));
+  const spreadAmount = smoothstep(1.32, 1.70, spreadRatio);
+
+  const tipToMcp = getSegmentLength3D(worldLandmarks, 13, 16) || getSegmentLength2D(landmarks, 13, 16);
+  const mcpToPip = getSegmentLength3D(worldLandmarks, 13, 14) || getSegmentLength2D(landmarks, 13, 14);
+  const curledAmount = mcpToPip > 1e-4 ? clamp01(1 - (tipToMcp / (mcpToPip * 2.35))) : 0;
+
+  // FIX A: handedness-aware front/back classification. The basis normal
+  // direction depends on K = palmSpan(5→17), which flips sign between right
+  // and left hands. Empirically, for a right hand the labels were inverted —
+  // back-of-hand poses got 'front' and palm-facing got 'back'. Negate the
+  // sign for right hands so both hands resolve to the same physical labels.
+  const palmFacingZ = isReportedRightHand ? -basisNormal.z : basisNormal.z;
+  let name = palmFacingZ >= 0 ? 'front' : 'back';
+  if (curledAmount > 0.30) name = 'fist';
+  if (sideAmount > 0.70) name = 'side';
+  if (fingerTowardCamera > 0.65) name = 'foreshortened';
+
+  const fit = RING_POSE_FIT[name] || RING_POSE_FIT.front;
+  return {
+    name,
+    fit,
+    palmFacing,
+    sideAmount,
+    fingerTowardCamera,
+    spreadAmount,
+    curledAmount
+  };
+}
+
 function hideBlockerOccluders() {
   for (const blockerMesh of blockerOccluderMeshes) {
     blockerMesh.visible = false;
@@ -1524,7 +2416,9 @@ function processResults(results) {
     isHandPresent = false;
     if (ringModel) ringModel.visible = false;
     occluderMesh.visible = false;
+    hideHandOccluders();
     hideBlockerOccluders();
+    updateRiggedHand(results); // hides rigged debug hand when no landmarks
     landmarkCtx.clearRect(0, 0, landmarkCanvas.width, landmarkCanvas.height);
     // Hide the pose hint when no hand is present — the hint is specifically
     // "rotate your hand," which doesn't apply if there's no hand in frame.
@@ -1547,6 +2441,7 @@ function processResults(results) {
   isHandPresent = true;
   ringModel.visible = true;
   const landmarks = results.landmarks[0];
+  const activeFinger = getActiveFinger();
   // Gate hand-skeleton overlay on the Show Hand Mesh checkbox. When unchecked,
   // clear the canvas instead of drawing — otherwise the last drawn skeleton
   // would linger on screen.
@@ -1555,18 +2450,29 @@ function processResults(results) {
   } else {
     landmarkCtx.clearRect(0, 0, landmarkCanvas.width, landmarkCanvas.height);
   }
+  const reportedHandedness = getReportedHandedness(results);
+  // PR-α: drive the rigged debug hand from landmarks. Pure additive — no
+  // effect on tracking or occlusion when the checkbox is off.
+  updateRiggedHand(results);
+  const activeHandOccluder = getHandOccluderForResults(results);
+  if (activeHandOccluder && _cbShowHandMesh && _cbShowHandMesh.checked) {
+    hideHandOccluders(activeHandOccluder);
+    activeHandOccluder.setMode('debug');
+    activeHandOccluder.setVisible(true);
+    activeHandOccluder.updatePose(results, { activeFingerId: activeFinger.id });
+  } else {
+    hideHandOccluders();
+  }
   const worldLandmarks = results.worldLandmarks ? results.worldLandmarks[0] : null;
-  const isReportedRightHand = results.handednesses &&
-    results.handednesses[0] &&
-    results.handednesses[0][0] &&
-    results.handednesses[0][0].categoryName === 'Right';
-  const activeFinger = getActiveFinger();
+  const isReportedRightHand = reportedHandedness === 'Right';
   const [anchorStart, anchorEnd] = activeFinger.anchor;
 
   // Position (Anchored to the selected finger segment). Uses _tmpPosA as a
   // scratch for the NDC conversion before copying into targetPos.
-  const mid2D = getMidpoint2D(landmarks, anchorStart, anchorEnd);
-  mapToOrthographicSpaceInto(_tmpPosA, mid2D);
+  const ringAnchorT = _slRingAnchorT ? Math.min(1, Math.max(0, parseFloat(_slRingAnchorT.value) || 0.5)) : 0.5;
+  _tmpMid2D.x = landmarks[anchorStart].x * (1 - ringAnchorT) + landmarks[anchorEnd].x * ringAnchorT;
+  _tmpMid2D.y = landmarks[anchorStart].y * (1 - ringAnchorT) + landmarks[anchorEnd].y * ringAnchorT;
+  mapToOrthographicSpaceInto(_tmpPosA, _tmpMid2D);
   targetPos.copy(_tmpPosA);
 
   // Rotation Basis (Camera independent from World Landmarks)
@@ -1590,10 +2496,6 @@ function processResults(results) {
     }
   }
 
-  _tmpDirX.crossVectors(_tmpDirD, _tmpDirN).normalize();
-  _tmpMat4.makeBasis(_tmpDirX, _tmpDirD, _tmpDirN);
-  targetOccQuat.setFromRotationMatrix(_tmpMat4);
-
   // Pose-quality gate. Two independent bad-pose signals, either one hides.
   //   A) |D.z| high → finger along camera axis (basis degenerate)
   //   B) palmSpan / middleFinger high → fingers fanned wide (landmark noise)
@@ -1606,6 +2508,109 @@ function processResults(results) {
   const palmSpan2D = getSegmentLengthForPose(landmarks, 5, 17, _vw, _vh);
   const middleSeg2D = getSegmentLengthForPose(landmarks, 9, 10, _vw, _vh);
   const spreadRatio = middleSeg2D > 1e-4 ? palmSpan2D / middleSeg2D : 0;
+  const poseFit = classifyRingPose(landmarks, worldLandmarks, _tmpDirN, _tmpDirD, spreadRatio, isReportedRightHand);
+  window.__lastRingPoseFit = poseFit;
+
+  // Patch 2 (Path B): occluded-finger guard. When the active finger is
+  // hidden behind extended fingers (peace-sign / scissors poses), MediaPipe
+  // still reports world landmarks for it but the values drift sideways and
+  // the ring renders in empty space. Detect the situation by comparing the
+  // active finger's MCP→TIP world distance against the palm span — a
+  // healthy extended finger is roughly 0.7×–1.6× the palm-span; values way
+  // below or above mean the model is guessing. Hide the ring rather than
+  // place it in the phantom position. Showing nothing > showing wrong.
+  let _hideThisFrame = false;
+  if (worldLandmarks && activeFinger?.anchor) {
+    const [aStart] = activeFinger.anchor;
+    const aTip = aStart + 3;
+    const fingerWorldLen = getSegmentLength3D(worldLandmarks, aStart, aTip);
+    const palmWorldSpan = getSegmentLength3D(worldLandmarks, 5, 17);
+    if (palmWorldSpan > 1e-4 && fingerWorldLen > 1e-4) {
+      const ratio = fingerWorldLen / palmWorldSpan;
+      _dbgFingerRatio = ratio;
+      // Outside [0.45, 1.80] → finger landmark is suspect.
+      if (ratio < 0.45 || ratio > 1.80) _hideThisFrame = true;
+    }
+
+    // Self-occlusion guard for poses like peace-sign / V-sign where the
+    // active finger is curled BEHIND two extended fingers. Compare other
+    // fingertips against the active finger's TIP Z (not MCP Z) — when all
+    // fingers are spread open toward the camera every tip is naturally in
+    // front of the MCP, which caused a false-positive hide on open palms.
+    if (!_hideThisFrame) {
+      const aTipZ = worldLandmarks[aStart + 3].z;  // active finger TIP z
+      const aTipIdx = aStart + 3;
+      const FINGER_TIPS = [8, 12, 16, 20];
+      let forwardCount = 0;
+      for (const tipIdx of FINGER_TIPS) {
+        if (tipIdx === aTipIdx) continue;
+        if (worldLandmarks[tipIdx].z - aTipZ < -0.04) forwardCount++;
+      }
+      _dbgForwardCount = forwardCount;
+      if (forwardCount >= 2) _hideThisFrame = true;
+    }
+  }
+  _dbgHideThisFrame = _hideThisFrame;
+  // FIX D: hysteresis. A single bad frame doesn't hide; the ring stays
+  // hidden across short noise bursts. State transitions only on streaks.
+  if (_hideThisFrame) {
+    _hideBadStreak++;
+    _hideGoodStreak = 0;
+    if (_hideBadStreak >= HIDE_REQUIRES_BAD_FRAMES) _hideActive = true;
+  } else {
+    _hideGoodStreak++;
+    _hideBadStreak = 0;
+    if (_hideGoodStreak >= HIDE_RELEASES_GOOD_FRAMES) _hideActive = false;
+  }
+  if (_hideActive) {
+    ringModel.visible = false;
+    occluderMesh.visible = false;
+    hideBlockerOccluders();
+    updatePoseDebugHud(poseFit, _tmpDirN, _tmpDirD, isReportedRightHand, reportedHandedness, fingerZMag, spreadRatio, activeFinger);
+    return;
+  }
+
+  // Diagnostic HUD: read-only sample of the inputs the classifier just used,
+  // plus the chosen profile name. Throttled to ~10 fps so it doesn't burn
+  // layout time on every render frame.
+  updatePoseDebugHud(poseFit, _tmpDirN, _tmpDirD, isReportedRightHand, reportedHandedness, fingerZMag, spreadRatio, activeFinger);
+
+  // FIX B: for FLAT-OPEN hands (palm or back facing camera, fingers spread,
+  // not curled), the screen-blend on _tmpDirD can drag the ring laterally
+  // off the finger because it's mixing two unit vectors with different
+  // magnitudes when normalized. Detect flat-open and skip the blend — the
+  // 2D anchor projection is already accurate for these poses.
+  const _isFlatOpen = poseFit.palmFacing > 0.80 && poseFit.curledAmount < 0.20;
+  // Screen-space assist keeps the rendered ring visually parallel to the
+  // selected finger while preserving most of MediaPipe's 3D depth direction.
+  // The blend is deliberately small; it corrects drift without taking over.
+  getSegmentSceneDirectionInto(_tmpDirSurface, landmarks, anchorStart, anchorEnd);
+  const _effectiveScreenBlend = _isFlatOpen ? 0 : poseFit.fit.screenBlend;
+  _tmpDirD.lerp(_tmpDirSurface, _effectiveScreenBlend).normalize();
+  _tmpDirN.crossVectors(_tmpDirK, _tmpDirD).normalize();
+  if (_tmpDirN.lengthSq() < 0.01) {
+    _tmpDirN.crossVectors(Y_AXIS, _tmpDirD).normalize();
+  }
+  _tmpDirX.crossVectors(_tmpDirD, _tmpDirN).normalize();
+  // FIX C: for flat-open hands, override the basis with a screen-space frame
+  // so the ring's roll axis stays anchored to the visible image plane. The
+  // MediaPipe-world basis can flip sign on tiny landmark noise when the
+  // palm is parallel to the image plane, which made the ring appear rolled
+  // 90° on otherwise-correct flat poses (e.g. open palm). Screen-space D
+  // (already in _tmpDirSurface) plus a discretized N keeps roll locked.
+  // Sign of N is taken from the freshly-computed world palm normal so it
+  // matches palm/back direction regardless of pose-name handling — the
+  // pose-name labels are handedness-inverted by FIX A and not safe to
+  // branch on here.
+  if (_isFlatOpen) {
+    const _origNormSignZ = _tmpDirN.z >= 0 ? 1 : -1;
+    _tmpDirD.copy(_tmpDirSurface);
+    _tmpDirN.set(0, 0, _origNormSignZ);
+    _tmpDirX.crossVectors(_tmpDirD, _tmpDirN).normalize();
+    _tmpDirN.crossVectors(_tmpDirX, _tmpDirD).normalize();
+  }
+  _tmpMat4.makeBasis(_tmpDirX, _tmpDirD, _tmpDirN);
+  targetOccQuat.setFromRotationMatrix(_tmpMat4);
 
   // -- COMMENTED OUT POSE RESTRICTION --
   // if (_ringPoseAcceptable) {
@@ -1636,6 +2641,12 @@ function processResults(results) {
   _ringPoseAcceptable = true;
   _setPoseHintVisible(false);
 
+  const assistedAnchorT = Math.min(0.78, Math.max(0.18, ringAnchorT + poseFit.fit.anchorBias));
+  _tmpMid2D.x = landmarks[anchorStart].x * (1 - assistedAnchorT) + landmarks[anchorEnd].x * assistedAnchorT;
+  _tmpMid2D.y = landmarks[anchorStart].y * (1 - assistedAnchorT) + landmarks[anchorEnd].y * assistedAnchorT;
+  mapToOrthographicSpaceInto(_tmpPosA, _tmpMid2D);
+  targetPos.copy(_tmpPosA);
+
   const rotX = _slRotX.value * Math.PI / 180;
   const rotY = _slRotY.value * Math.PI / 180;
   const rotZ = _slRotZ.value * Math.PI / 180;
@@ -1651,9 +2662,49 @@ function processResults(results) {
   mapToOrthographicSpaceInto(_tmpPosA, landmarks[anchorStart]);
   mapToOrthographicSpaceInto(_tmpPosB, landmarks[anchorEnd]);
   const segLengthWorld = _tmpPosA.distanceTo(_tmpPosB);
+  const fingerRadiusScene = estimateFingerRadiusScene(landmarks, anchorStart, anchorEnd, segLengthWorld);
   const sBase = parseFloat(_slScaleBase.value);
-  const scaleVal = segLengthWorld * sBase;
+  const radiusScale = fingerRadiusScene * 3.25;
+  const radiusBlend = poseFit.fit.scaleRadiusBlend;
+  const fitMetric = mix(segLengthWorld, radiusScale, radiusBlend);
+  // Per-pose calibration. Lives in RING_POSE_FIT so each pose (front/back/
+  // side/foreshortened/fist) tunes independently — a global multiplier was
+  // over-correcting on back-of-hand and curled-finger poses that were already
+  // sized correctly. Default 1.0 if a pose entry doesn't define it.
+  const poseScaleBoost = poseFit.fit.scaleBoost ?? 1.0;
+  const scaleVal = fitMetric * sBase * mix(1.0, activeFinger.widthMul, 0.35) * poseScaleBoost;
   targetScale.set(scaleVal, scaleVal, scaleVal);
+
+  // Placement offsets mirror Jewel's manual Position controls, but are applied
+  // in the live finger basis so they continue to behave correctly as the hand
+  // rotates: X = across finger, Y = along finger, Z = palm/back normal.
+  // A zero manual offset uses the pose profile. A non-zero slider value acts
+  // as an override, which keeps the tweak engine useful during calibration.
+  const offsetX = _slRingOffsetX ? parseFloat(_slRingOffsetX.value) || 0 : 0;
+  const offsetY = _slRingOffsetY ? parseFloat(_slRingOffsetY.value) || 0 : 0;
+  const offsetZ = _slRingOffsetZ ? parseFloat(_slRingOffsetZ.value) || 0 : 0;
+  // FIX B (continued): for flat-open hands, zero the axisX/axisY profile push
+  // entirely. These offsets are added in MediaPipe-world directions but
+  // scaled by SCENE-space distances — a coordinate-frame mix that's small
+  // for non-flat poses but blows up on open palms where the world basis can
+  // tilt. Manual slider overrides still apply (calibration use).
+  const fitAxisX = Math.abs(offsetX) > 0.001 ? offsetX : (_isFlatOpen ? 0 : poseFit.fit.axisX);
+  const fitAxisY = Math.abs(offsetY) > 0.001 ? offsetY : (_isFlatOpen ? 0 : poseFit.fit.axisY);
+  const fitSurfaceZ = poseFit.fit.surfaceLift + offsetZ;
+  // FIX 1 (Path B): on a left hand, MediaPipe's mirrored-image landmarks
+  // make _tmpDirX point the OPPOSITE direction across the finger from the
+  // right-hand case. The handedness rotation flip already handles ring
+  // orientation, but the lateral placement offset (axisX) ends up on the
+  // wrong side of the finger. Negate the X contribution for left hands so
+  // the ring biases toward the same anatomical side regardless of which
+  // hand is in frame.
+  const handednessSignX = isReportedRightHand ? 1 : -1;
+  _tmpDirSurface.copy(_tmpDirN);
+  if (_tmpDirSurface.z < 0) _tmpDirSurface.multiplyScalar(-1);
+  targetPos
+    .addScaledVector(_tmpDirX, segLengthWorld * fitAxisX * handednessSignX)
+    .addScaledVector(_tmpDirD, segLengthWorld * fitAxisY)
+    .addScaledVector(_tmpDirSurface, fingerRadiusScene * fitSurfaceZ);
 
   // One-Euro filter pass: replaces targetPos / targetQuat / targetScale with
   // their adaptive-smoothed versions. Stationary hand = heavy smoothing
@@ -1697,15 +2748,15 @@ function processResults(results) {
 
   const dist3D = getSegmentLength3D(worldLandmarks, anchorStart, anchorEnd);
 
-  // Use segLengthWorld (aspect-corrected) instead of dist2D (warped) 
+  // Use segLengthWorld (aspect-corrected) instead of dist2D (warped)
   // to ensure the occluder doesn't grow when the hand is horizontal.
   const foreshortenFactor = segLengthWorld > 1e-4 ? Math.max(1.0, (dist3D * 5.0) / (segLengthWorld * 1.0)) : 1.0;
   const finalForeshorten = Math.min(foreshortenFactor, 2.5);
 
   targetOccScale.set(
-    segLengthWorld * occluderBase * activeFinger.widthMul * 0.5,
+    fingerRadiusScene * 2.2 * occluderBase * activeFinger.widthMul,
     segLengthWorld * 2.0 * finalForeshorten, 
-    segLengthWorld * occluderBase * activeFinger.widthMul * 0.5
+    fingerRadiusScene * 2.2 * occluderBase * activeFinger.widthMul
   );
   updateBlockerOccluders(
     landmarks,
