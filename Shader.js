@@ -887,7 +887,11 @@ export function createDiamondPhysicalMaterial(geometry, params = {}) {
     // the transmission render pass, where it samples the opaque backdrop RT
     // with IOR-offset UVs. That's how real refraction through the hand works.
     transparent: false,
+<<<<<<< HEAD
     side: THREE.DoubleSide, // render back faces so gems look solid from every angle
+=======
+    side: THREE.FrontSide,
+>>>>>>> e925a796b8518a88567cc3bf451b646ccceb300a
   });
 
   // MeshPhysicalMaterial.transmission gives us the hand refracted through the
