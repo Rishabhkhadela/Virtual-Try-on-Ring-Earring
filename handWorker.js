@@ -37,7 +37,8 @@ async function createHandLandmarker(delegate) {
     numHands: 1,
     minHandDetectionConfidence: 0.6,
     minHandPresenceConfidence: 0.6,
-    minTrackingConfidence: 0.6
+    minTrackingConfidence: 0.6,
+    output_segmentation_masks: true,
   });
 }
 
@@ -87,14 +88,105 @@ self.onmessage = async (e) => {
         worldLandmarks: results.worldLandmarks ? results.worldLandmarks.map(arr => arr.map(p => ({ x: p.x, y: p.y, z: p.z, visibility: p.visibility }))) : [],
         handednesses: results.handednesses ? results.handednesses.map(arr => arr.map(h => ({ categoryName: h.categoryName, score: h.score }))) : []
       };
+
+      // Extract segmentation mask — measure finger width in worker so we only
+      // transfer a small downsampled preview instead of the full-res mask.
+      let measuredRadius = 0;
+      let segPreview = null, segPreviewW = 0, segPreviewH = 0;
+
+      const maskObj = results.segmentationMasks?.[0];
+      if (maskObj) {
+        const maskW = maskObj.width;
+        const maskH = maskObj.height;
+        const f32   = maskObj.getAsFloat32Array();
+
+        // ── Measure ring finger width (LM13 = ring MCP) ─────────────────────
+        // ── Method B: Geometric Bounding Boxes ─────────────────────────────
+        // Instead of a single scanline at the joint, we find the bounding box
+        // of all "on" pixels in the mask around the finger segment. The width
+        // of this box (perpendicular to the segment) is the finger thickness.
+        const anchorStart = msg.anchorStart ?? 13;
+        const anchorEnd   = msg.anchorEnd   ?? 14;
+        const lmA = results.landmarks?.[0]?.[anchorStart];
+        const lmB = results.landmarks?.[0]?.[anchorEnd];
+
+        if (lmA && lmB) {
+          const x1 = Math.round(lmA.x * maskW);
+          const y1 = Math.round(lmA.y * maskH);
+          const x2 = Math.round(lmB.x * maskW);
+          const y2 = Math.round(lmB.y * maskH);
+
+          // Padding ensures we capture the full finger width even if the
+          // landmarks are slightly off-center. 25 pixels ≈ 10-15% of frame.
+          const padding = 25;
+          const minBX = Math.max(0, Math.min(x1, x2) - padding);
+          const maxBX = Math.min(maskW - 1, Math.max(x1, x2) + padding);
+          const minBY = Math.max(0, Math.min(y1, y2) - padding);
+          const maxBY = Math.min(maskH - 1, Math.max(y1, y2) + padding);
+
+          let onMinX = maxBX, onMaxX = minBX;
+          let onMinY = maxBY, onMaxY = minBY;
+          let found = false;
+
+          for (let y = minBY; y <= maxBY; y++) {
+            for (let x = minBX; x <= maxBX; x++) {
+              if (f32[y * maskW + x] > 0.5) {
+                if (x < onMinX) onMinX = x;
+                if (x > onMaxX) onMaxX = x;
+                if (y < onMinY) onMinY = y;
+                if (y > onMaxY) onMaxY = y;
+                found = true;
+              }
+            }
+          }
+
+          if (found) {
+            const dx = Math.abs(x2 - x1);
+            const dy = Math.abs(y2 - y1);
+            // If segment is more vertical, width is horizontal span; else vertical span.
+            const widthPixels = (dy > dx) ? (onMaxX - onMinX + 1) : (onMaxY - onMinY + 1);
+            // Ortho camera spans 2 world units across full frame width.
+            // (widthPixels / maskW) * 2.0 is the full width in world units.
+            measuredRadius = (widthPixels / maskW) * 2.0 / 2;
+
+            // Optional: send the bbox back for visualization
+            self.measuredBBox = { minX: onMinX, maxX: onMaxX, minY: onMinY, maxY: onMaxY };
+          } else {
+            self.measuredBBox = null;
+          }
+        } else {
+          self.measuredBBox = null;
+        }
+
+        // ── Downsample 4× for visualizer (160×90 ≈ 14 KB vs 300 KB full) ───
+        const SCALE  = 4;
+        segPreviewW  = Math.floor(maskW / SCALE);
+        segPreviewH  = Math.floor(maskH / SCALE);
+        segPreview   = new Uint8Array(segPreviewW * segPreviewH);
+        for (let y = 0; y < segPreviewH; y++) {
+          const srcRow = (y * SCALE) * maskW;
+          const dstRow = y * segPreviewW;
+          for (let x = 0; x < segPreviewW; x++) {
+            segPreview[dstRow + x] = f32[srcRow + x * SCALE] > 0.5 ? 1 : 0;
+          }
+        }
+
+        try { maskObj.close(); } catch (_) {}
+      }
+
       const detectMs = performance.now() - t0;
       self.postMessage({
         type: 'results',
         results: safe,
         frameId: msg.frameId,
         detectMs,
-        delegate: currentDelegate
-      });
+        delegate: currentDelegate,
+        measuredRadius,   // float: ring finger radius in world units (0 = no hand)
+        measuredBBox: self.measuredBBox, // Bounding box for visualization
+        segPreview,       // Uint8Array 1/4-res mask for visualizer (or null)
+        segPreviewW,
+        segPreviewH,
+      }, segPreview ? [segPreview.buffer] : []);
     } catch (err) {
       self.postMessage({
         type: 'detect-error',
